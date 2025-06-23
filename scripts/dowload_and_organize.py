@@ -1,5 +1,3 @@
-import kagglehub
-
 """
 TO-DO
 1) Only download if the data hasnt been downloaded yet
@@ -15,6 +13,32 @@ Things to consider:
 - Have the plotting functions be inside of src/
 - Only having this function make calls to files and functions within the src/ folder
 """
+import sys
+from pathlib import Path
 
-# Download latest version
-path = kagglehub.dataset_download("saurabhshahane/predicting-heat-flux")
+sys.path.append(str(Path(__file__).parent.parent))
+from src.data import download_dataset, split_data 
+
+def main():
+
+
+    #downloads the dataset from kaggle
+    print("Starting data download...")
+    download_success = download_dataset()
+    
+    if download_success:
+        print("\n=== Data Splitting ===")
+        try:
+            train_path, test_path = split_data()
+            print(f"\nTrain: {train_path}\nTest: {test_path}")
+        except Exception as e:
+            print(f"\n× Error: {str(e)}")
+    else:
+        print("Aborting due to download failure")
+
+
+    
+
+if __name__ == "__main__":
+    main()
+
