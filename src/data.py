@@ -76,6 +76,7 @@ def preprocess_data(df):
     df_processed = df.copy()
     
     # Remove the 'author' column
+    if 'author' in df_processed.columns:
         df_processed = df_processed.drop('author', axis=1)
         print("✓ Removed 'author' column")
     
