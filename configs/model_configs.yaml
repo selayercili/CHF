@@ -1,0 +1,7 @@
+nn:
+  epochs: 1
+  layer_1: 10
+
+xgboost:
+  epochs: 1
+  heads: 10
