@@ -1,9 +1,3 @@
-"""
-Neural Network Model Implementation
-
-This module implements a neural network model interface for the training pipeline.
-"""
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,36 +8,38 @@ from typing import Dict, Any, Optional, Tuple
 import pickle
 
 class NeuralNetwork:
-    """Neural network model wrapper for the training pipeline."""
+    """Neural network model wrapper with dynamic input sizing."""
     
-    def __init__(self, input_size: int, hidden_size: int = 64, output_size: int = 1, 
+    def __init__(self, hidden_size: int = 64, output_size: int = 1, 
                  learning_rate: float = 0.001, **kwargs):
         """
         Initialize neural network model.
         
         Args:
-            input_size: Number of input features
             hidden_size: Number of neurons in hidden layers
             output_size: Size of output layer
             learning_rate: Learning rate for optimizer
         """
-        self.model = self._build_model(input_size, hidden_size, output_size)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.learning_rate = learning_rate
+        self.model = None  # Will be initialized when we see data
+        self.optimizer = None
         self.criterion = nn.MSELoss()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model.to(self.device)
         self.is_fitted = False
         self.epoch = 0
+        self.input_size = None  # Will be set during first data processing
         
-    def _build_model(self, input_size, hidden_size, output_size) -> nn.Module:
+    def _build_model(self, input_size: int) -> nn.Module:
         """Build the neural network architecture"""
         return nn.Sequential(
-            nn.Linear(input_size, hidden_size),
+            nn.Linear(input_size, self.hidden_size),
             nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(self.hidden_size, self.hidden_size),
             nn.ReLU(),
-            nn.Linear(hidden_size, output_size)
-        )
+            nn.Linear(self.hidden_size, self.output_size)
+        ).to(self.device)
     
     def _prepare_data(self, data: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -55,9 +51,19 @@ class NeuralNetwork:
         Returns:
             Tuple of (features, target) tensors
         """
-        # Assume last column is target
-        X = data.iloc[:, :-1].values
-        y = data.iloc[:, -1].values
+        # Get target column name dynamically
+        target_col = [col for col in data.columns if 'chf_exp' in col][0]
+        
+        # Separate features and target
+        X = data.drop(target_col, axis=1).values
+        y = data[target_col].values
+        
+        # Initialize model if not done yet
+        if self.model is None:
+            self.input_size = X.shape[1]
+            self.model = self._build_model(self.input_size)
+            self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+            print(f"✓ Built model for {self.input_size} input features")
         
         X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
         y_tensor = torch.tensor(y, dtype=torch.float32).view(-1, 1).to(self.device)
@@ -164,9 +170,12 @@ class NeuralNetwork:
         if not self.is_fitted:
             raise ValueError("Model must be trained before prediction")
         
-        # If data has target column, remove it
-        if data.shape[1] == self.model[0].in_features + 1:
-            X = data.iloc[:, :-1].values
+        # Get target column name dynamically
+        target_col = [col for col in data.columns if 'chf_exp' in col][0] if any('chf_exp' in col for col in data.columns) else None
+        
+        # Remove target column if present
+        if target_col and target_col in data.columns:
+            X = data.drop(target_col, axis=1).values
         else:
             X = data.values
         
@@ -186,12 +195,19 @@ class NeuralNetwork:
             path: Path to save the model
             metadata: Additional metadata to save with the model
         """
+        if self.model is None:
+            raise ValueError("Model not initialized - nothing to save")
+        
         save_dict = {
             'model_state': self.model.state_dict(),
-            'optimizer_state': self.optimizer.state_dict(),
+            'optimizer_state': self.optimizer.state_dict() if self.optimizer else None,
             'epoch': self.epoch,
             'is_fitted': self.is_fitted,
-            'device': self.device.type
+            'device': self.device.type,
+            'input_size': self.input_size,
+            'hidden_size': self.hidden_size,
+            'output_size': self.output_size,
+            'learning_rate': self.learning_rate
         }
         
         if metadata:
@@ -208,8 +224,19 @@ class NeuralNetwork:
         """
         checkpoint = torch.load(path, map_location=self.device)
         
+        # Rebuild model architecture
+        self.input_size = checkpoint['input_size']
+        self.hidden_size = checkpoint['hidden_size']
+        self.output_size = checkpoint['output_size']
+        self.learning_rate = checkpoint.get('learning_rate', 0.001)
+        self.model = self._build_model(self.input_size)
+        
+        # Load state
         self.model.load_state_dict(checkpoint['model_state'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+        if checkpoint['optimizer_state']:
+            self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+            self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+        
         self.epoch = checkpoint['epoch']
         self.is_fitted = checkpoint['is_fitted']
         
@@ -222,11 +249,11 @@ class NeuralNetwork:
         Returns:
             DataFrame with feature importance
         """
-        if not self.is_fitted:
+        if not self.is_fitted or self.model is None:
             raise ValueError("Model must be trained before getting feature importance")
         
         # Create dummy input
-        dummy_input = torch.ones(1, self.model[0].in_features, device=self.device)
+        dummy_input = torch.ones(1, self.input_size, device=self.device)
         dummy_input.requires_grad = True
         
         # Forward pass

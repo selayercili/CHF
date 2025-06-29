@@ -39,7 +39,6 @@ xgboost:
 
 neural_network:
   init_params:
-    input_size: 9  # Number of features
     hidden_size: 64
     learning_rate: 0.001
   epochs: 50
