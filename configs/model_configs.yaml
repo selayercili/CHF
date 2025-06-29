@@ -39,17 +39,8 @@ lightgbm:
 
 neural_network:
   init_params:
-    input_dim: 10  # Adjust based on your features
-    hidden_dims: [128, 64, 32]
-    output_dim: 1
-    activation: "relu"
-    dropout_rate: 0.2
-  
+    input_size: 9  # Number of features
+    hidden_size: 64
+    learning_rate: 0.001
   epochs: 50
-  batch_size: 128
-  learning_rate: 0.001
-  
-  # Neural network specific
-  optimizer: "adam"
-  loss_function: "mse"
-  scheduler_patience: 5
+  batch_size: 32
