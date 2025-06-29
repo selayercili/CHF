@@ -1,6 +1,5 @@
-"""
 #!/usr/bin/env python3
-
+"""
 1) Import in train and test data
 2) Loop through the models
 3) Train the models
