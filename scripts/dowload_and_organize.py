@@ -17,24 +17,24 @@ import sys
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
-from src.data import download_dataset, split_data 
+from src.data import download_dataset, split_data
+from src.plotting import create_eda_plots 
 
 def main():
-
-
-    #downloads the dataset from kaggle
-    print("Starting data download...")
+    print("=== Data Download ===")
     download_success = download_dataset()
     
     if download_success:
         print("\n=== Data Splitting ===")
-        try:
-            train_path, test_path = split_data()
-            print(f"\nTrain: {train_path}\nTest: {test_path}")
-        except Exception as e:
-            print(f"\n× Error: {str(e)}")
+        train_path, test_path = split_data()
+        
+        print("\n=== Data Visualization ===")
+        create_eda_plots() 
+        
+        print("\n Pipeline complete! Ready for modeling.")
     else:
-        print("Aborting due to download failure")
+        print("\n Aborting due to download failure")
+
 
 
     

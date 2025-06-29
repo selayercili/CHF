@@ -1,4 +1,4 @@
 # CHF
 A machine learning project to predict critical heat flux in aerospace materials. Currently in development.
 
-**Setup**: `pip install pandas scikit-learn` 
+**Setup**: `pip install pandas scikit-learn matplotlib seaborn ` 
