@@ -1,0 +1,20 @@
+"""
+1) Import the test data
+2) Loop through the models
+3) Evaluate the models - the weights are located in the models directory
+4) Save the model predictions in the results directory - this will be in the results/ folder
+
+from model_1 import model_1
+from model_2 import model_2
+
+model_names = [model_1, model_2]
+
+for model_name in model_names:
+    model = model_1(train, test, config_args[model_name])
+    model.load_weights(f"./weights/{model_name}/{epoch}.pth")
+    model.test()
+"""
+
+
+
+
