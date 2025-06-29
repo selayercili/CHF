@@ -1,7 +1,55 @@
-nn:
-  epochs: 1
-  layer_1: 10
+# Model Configuration File
+# Each top-level key represents a model to train
 
 xgboost:
-  epochs: 1
-  heads: 10
+  # Model initialization parameters
+  init_params:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.3
+    objective: "reg:squarederror"
+    random_state: 42
+  
+  # Training parameters
+  epochs: 10
+  batch_size: 32
+  learning_rate: 0.001  # For optimizer if applicable
+  
+  # Additional model-specific parameters
+  early_stopping_rounds: 10
+  eval_metric: "rmse"
+
+lightgbm:
+  init_params:
+    num_leaves: 31
+    learning_rate: 0.05
+    feature_fraction: 0.9
+    bagging_fraction: 0.8
+    bagging_freq: 5
+    verbose: 0
+    random_state: 42
+  
+  epochs: 15
+  batch_size: 64
+  learning_rate: 0.001
+  
+  # LightGBM specific
+  num_boost_round: 100
+  early_stopping_rounds: 10
+
+neural_network:
+  init_params:
+    input_dim: 10  # Adjust based on your features
+    hidden_dims: [128, 64, 32]
+    output_dim: 1
+    activation: "relu"
+    dropout_rate: 0.2
+  
+  epochs: 50
+  batch_size: 128
+  learning_rate: 0.001
+  
+  # Neural network specific
+  optimizer: "adam"
+  loss_function: "mse"
+  scheduler_patience: 5
