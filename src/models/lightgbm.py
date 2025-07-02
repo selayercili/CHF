@@ -11,7 +11,7 @@ import pickle
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
-class LightGBM:
+class Lightgbm:
     """LightGBM model wrapper for the training pipeline."""
     
     def __init__(self, **kwargs):
