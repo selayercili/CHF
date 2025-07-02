@@ -26,12 +26,12 @@ lightgbm:
     num_leaves: 31
     metric: ["l2", "mae"]
     verbosity: -1
-  epochs: 100
+  epochs: 10
   batch_size: null  # Not used for LightGBM
 
 neural_network:
   init_params:
     hidden_size: 64
     learning_rate: 0.001
-  epochs: 30
+  epochs: 10
   batch_size: 32
