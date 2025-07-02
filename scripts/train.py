@@ -42,7 +42,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Tuple
 import yaml
 import pandas as pd
-import torch
+import torch # type: ignore
 from tqdm import tqdm
 
 # Add project root to path

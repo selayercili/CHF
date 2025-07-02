@@ -35,3 +35,11 @@ neural_network:
     learning_rate: 0.001
   epochs: 10
   batch_size: 32
+
+svm:
+  init_params:
+    kernel: 'rbf'       # rbf, linear, poly, sigmoid
+    C: 1.0              # Regularization parameter
+    epsilon: 0.1        # Epsilon-tube for SVR
+    gamma: 'scale'      # Kernel coefficient
+  epochs: 1             # SVM trains fully in one epoch
