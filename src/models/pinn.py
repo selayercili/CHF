@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, Tuple  # <-- Added Tuple import
 from pathlib import Path
 import pickle
 
-class PINN:
+class Pinn:
     """PINN model wrapper with physics constraints for heat flux prediction."""
     
     def __init__(self, hidden_size: int = 64, learning_rate: float = 0.001, 
