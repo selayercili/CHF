@@ -1,3 +1,9 @@
+"""
+LightGBM Model Implementation (Fixed for scikit-learn API)
+
+This module implements the LightGBM model interface compatible with scikit-learn.
+"""
+
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
@@ -6,10 +12,17 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
 class Lightgbm:
+    """LightGBM model wrapper with scikit-learn compatible API."""
     
     def __init__(self, **kwargs):
-        # Store original learning rate
-        self.learning_rate = kwargs.get('learning_rate', 0.1)
+        """
+        Initialize LightGBM model with given parameters.
+        
+        Args:
+            **kwargs: Parameters passed to lgb.LGBMRegressor/LGBMClassifier
+        """
+        # Store original parameters
+        self.params = kwargs
         
         # Determine task type
         objective = kwargs.get('objective', 'regression')
@@ -23,58 +36,79 @@ class Lightgbm:
         
         self.is_fitted = False
         self.best_iteration = 0
+        self.learning_rate = kwargs.get('learning_rate', 0.1)
         
     def _prepare_data(self, data: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-        """Prepare data for training/validation."""
+        """
+        Prepare data for training/validation.
+        
+        Args:
+            data: DataFrame with features and target
+            
+        Returns:
+            Tuple of (features, target)
+        """
         # Assume last column is target
         X = data.iloc[:, :-1].values
         y = data.iloc[:, -1].values
+        
         return X, y
     
     def train_epoch(self, train_data: pd.DataFrame, 
                    batch_size: int = None,
                    optimizer: Any = None) -> Dict[str, float]:
-        """Fixed training method with proper learning rate handling."""
+        """
+        Train the model for one epoch (boosting round).
+        
+        Args:
+            train_data: Training dataframe
+            batch_size: Not used for LightGBM
+            optimizer: Not used for LightGBM
+            
+        Returns:
+            Dictionary of training metrics
+        """
         X_train, y_train = self._prepare_data(train_data)
         
         # For first epoch: initialize model
         if not self.is_fitted:
             self.model.fit(X_train, y_train)
             self.is_fitted = True
-            self.best_iteration = 1
+            self.best_iteration = self.model.n_estimators
         else:
-            # Continue training with fixed learning rate
-            try:
-                # Try getting learning rate from booster
-                current_lr = self.model.booster_.params.get('learning_rate', self.learning_rate)
-            except AttributeError:
-                current_lr = self.learning_rate
-                
+            # Continue training by increasing n_estimators
+            current_estimators = self.model.n_estimators
+            self.model.set_params(n_estimators=current_estimators + 1)
             self.model.fit(
                 X_train, 
                 y_train,
-                init_model=self.model,
-                callbacks=[lgb.reset_parameter(learning_rate=current_lr)],
-                num_iteration=1
+                init_model=self.model
             )
             self.best_iteration += 1
         
         # Calculate training metrics
-        return self._calculate_metrics(X_train, y_train)
-    
-    def _calculate_metrics(self, X, y) -> Dict[str, float]:
-        """Calculate metrics based on task type."""
-        predictions = self.model.predict(X)
+        predictions = self.model.predict(X_train)
         
         if self.task_type == 'regression':
-            mse = np.mean((predictions - y) ** 2)
+            mse = np.mean((predictions - y_train) ** 2)
             rmse = np.sqrt(mse)
-            return {'loss': mse, 'rmse': rmse}
+            metrics = {'loss': mse, 'rmse': rmse}
         else:
-            accuracy = np.mean(predictions == y)
-            return {'loss': 1 - accuracy, 'accuracy': accuracy}
+            accuracy = np.mean(predictions == y_train)
+            metrics = {'loss': 1 - accuracy, 'accuracy': accuracy}
+        
+        return metrics
     
     def validate(self, test_data: pd.DataFrame) -> Dict[str, float]:
+        """
+        Validate the model on test data.
+        
+        Args:
+            test_data: Test dataframe
+            
+        Returns:
+            Dictionary of validation metrics
+        """
         if not self.is_fitted:
             raise ValueError("Model must be trained before validation")
         
@@ -85,9 +119,94 @@ class Lightgbm:
             mse = np.mean((predictions - y_test) ** 2)
             rmse = np.sqrt(mse)
             mae = np.mean(np.abs(predictions - y_test))
-            return {'loss': mse, 'rmse': rmse, 'mae': mae}
+            metrics = {'loss': mse, 'rmse': rmse, 'mae': mae}
         else:
             accuracy = np.mean(predictions == y_test)
-            return {'loss': 1 - accuracy, 'accuracy': accuracy}
+            metrics = {'loss': 1 - accuracy, 'accuracy': accuracy}
+        
+        return metrics
     
-    # ... (predict, save, load, get_feature_importance remain unchanged) ...
+    def predict(self, data: pd.DataFrame) -> np.ndarray:
+        """
+        Make predictions on new data.
+        
+        Args:
+            data: DataFrame with features
+            
+        Returns:
+            Array of predictions
+        """
+        if not self.is_fitted:
+            raise ValueError("Model must be trained before prediction")
+        
+        # If data has target column, remove it
+        if data.shape[1] == self.model.n_features_in_ + 1:
+            X = data.iloc[:, :-1].values
+        else:
+            X = data.values
+        
+        return self.model.predict(X)
+    
+    def save(self, path: Path, metadata: Dict[str, Any] = None):
+        """
+        Save model to disk.
+        
+        Args:
+            path: Path to save the model
+            metadata: Additional metadata to save with the model
+        """
+        save_dict = {
+            'model': self.model,
+            'task_type': self.task_type,
+            'is_fitted': self.is_fitted,
+            'best_iteration': self.best_iteration,
+            'params': self.params
+        }
+        
+        if metadata:
+            save_dict['metadata'] = metadata
+        
+        with open(path, 'wb') as f:
+            pickle.dump(save_dict, f)
+    
+    def load(self, path: Path):
+        """
+        Load model from disk.
+        
+        Args:
+            path: Path to load the model from
+        """
+        with open(path, 'rb') as f:
+            save_dict = pickle.load(f)
+        
+        self.model = save_dict['model']
+        self.task_type = save_dict['task_type']
+        self.is_fitted = save_dict['is_fitted']
+        self.best_iteration = save_dict['best_iteration']
+        self.params = save_dict.get('params', {})
+        
+        return save_dict.get('metadata', {})
+    
+    def get_feature_importance(self, importance_type: str = 'gain') -> pd.DataFrame:
+        """
+        Get feature importance scores.
+        
+        Args:
+            importance_type: 'split' or 'gain'
+            
+        Returns:
+            DataFrame with feature importance
+        """
+        if not self.is_fitted:
+            raise ValueError("Model must be trained before getting feature importance")
+        
+        importance = self.model.feature_importances_
+        
+        # Create DataFrame
+        feature_names = [f'feature_{i}' for i in range(len(importance))]
+        importance_df = pd.DataFrame({
+            'feature': feature_names,
+            'importance': importance
+        }).sort_values('importance', ascending=False)
+        
+        return importance_df
