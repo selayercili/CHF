@@ -27,7 +27,6 @@ Usage:
 
 
 import warnings
-from sklearn.exceptions import FutureWarning
 
 # Gets rid of noisy warnings from sklearn to keep output clean
 warnings.filterwarnings("ignore", category=FutureWarning, 
