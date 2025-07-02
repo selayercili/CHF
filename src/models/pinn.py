@@ -44,25 +44,25 @@ class Pinn:
 
     def _physics_loss(self, inputs: torch.Tensor, predictions: torch.Tensor) -> torch.Tensor:
         """
-        Computes physics-based loss (e.g., violates heat equation constraints).
-        Replace with your actual PDE for heat flux!
+        Computes physics-based loss for heat flux prediction.
+        Modified to ensure all tensors are properly connected in the computation graph.
         """
-        # Example placeholder: dT/dt - alpha*d²T/dx² = 0
-        # In practice, use autograd to compute derivatives
+        # Ensure we have gradient tracking for all inputs
         t = inputs[:, 0].requires_grad_(True)
         x = inputs[:, 1].requires_grad_(True)
         T = predictions
         
-        # First derivatives
-        dT_dt = torch.autograd.grad(T.sum(), t, create_graph=True)[0]
-        dT_dx = torch.autograd.grad(T.sum(), x, create_graph=True)[0]
+        # First derivatives (sum() ensures scalar output for grad())
+        dT_dt = torch.autograd.grad(T.sum(), t, create_graph=True, retain_graph=True)[0]
+        dT_dx = torch.autograd.grad(T.sum(), x, create_graph=True, retain_graph=True)[0]
         
         # Second derivative
-        d2T_dx2 = torch.autograd.grad(dT_dx.sum(), x, create_graph=True)[0]
+        d2T_dx2 = torch.autograd.grad(dT_dx.sum(), x, create_graph=True, retain_graph=True)[0]
         
-        # Heat equation residual (simplified example)
-        alpha = 1.0  # Thermal diffusivity
+        # Heat equation residual (adjust with your actual physics)
+        alpha = 1.0  # Thermal diffusivity - replace with your value
         residual = dT_dt - alpha * d2T_dx2
+    
         return torch.mean(residual**2)
 
     def _prepare_data(self, data: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
