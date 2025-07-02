@@ -43,3 +43,11 @@ svm:
     epsilon: 0.1        # Epsilon-tube for SVR
     gamma: 'scale'      # Kernel coefficient
   epochs: 1             # SVM trains fully in one epoch
+
+pinn:
+  init_params:
+    hidden_size: 128
+    learning_rate: 0.001
+    lambda_physics: 0.1  # Weight for physics loss term
+  epochs: 30
+  batch_size: 32
