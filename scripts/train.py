@@ -75,6 +75,14 @@ class ModelTrainer:
         
         return config
     
+    def train_epoch(self, train_data, batch_size=32, optimizer=None):
+        # Debug prints
+        sample = train_data.iloc[0]
+        print("\n=== Data Verification ===")
+        print("Input columns:", train_data.columns)
+        print("Sample input values:", sample.values[:-1])
+        print("Sample target value:", sample.values[-1])
+    
     def _setup_logging(self) -> logging.Logger:
         """Setup logging configuration."""
         # Create logs directory if it doesn't exist
