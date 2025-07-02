@@ -3,11 +3,11 @@ Physics-Informed Neural Network (PINN) Model Implementation
 
 Combines data-driven loss with physics-based constraints for heat flux prediction.
 """
-import torch
-import torch.nn as nn
+import torch # type: ignore
+import torch.nn as nn # type: ignore
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple  # <-- Added Tuple import
 from pathlib import Path
 import pickle
 
@@ -25,12 +25,12 @@ class PINN:
         self.hidden_size = hidden_size
         self.learning_rate = learning_rate
         self.lambda_physics = lambda_physics
-        self.model = None  # Initialized in _prepare_data
+        self.model = None
         self.optimizer = None
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.is_fitted = False
         self.epoch = 0
-        self.input_size = None  # Set during first data pass
+        self.input_size = None
 
     def _build_model(self, input_size: int) -> nn.Module:
         """3-layer MLP with ReLU activations."""
