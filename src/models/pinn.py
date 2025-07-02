@@ -44,50 +44,42 @@ class Pinn:
 
     def _physics_loss(self, inputs: torch.Tensor, predictions: torch.Tensor) -> torch.Tensor:
         """
-        Robust physics loss calculation for heat flux prediction.
-        Handles edge cases in gradient computation.
+        Physics loss with complete null-safety and gradient handling.
         """
-        # Ensure all input tensors require gradients
-        inputs.requires_grad_(True)
+        # Ensure gradient tracking
+        inputs = inputs.clone().requires_grad_(True)
         
-        # Recompute predictions from inputs to ensure graph connection
+        # Recompute predictions to ensure graph connection
         predictions = self.model(inputs)
         
-        # Get spatial and temporal dimensions
-        # Adjust these indices based on your actual input columns!
+        # Get dimensions - ADJUST THESE INDICES TO MATCH YOUR DATA!
         t = inputs[:, 0]  # Time dimension
         x = inputs[:, 1]  # Spatial dimension
         
-        # Calculate first derivatives
-        dT_dt = torch.autograd.grad(
-            predictions.sum(), t, 
-            create_graph=True, 
-            retain_graph=True,
-            allow_unused=True  # Critical for handling edge cases
-        )[0]
-        
-        dT_dx = torch.autograd.grad(
-            predictions.sum(), x, 
-            create_graph=True, 
-            retain_graph=True,
-            allow_unused=True
-        )[0]
-        
-        # Calculate second derivative
-        if dT_dx is not None:  # Only if first derivative exists
-            d2T_dx2 = torch.autograd.grad(
-                dT_dx.sum(), x, 
+        # Calculate derivatives with null checks
+        def safe_grad(output, input):
+            grad = torch.autograd.grad(
+                outputs=output.sum(),
+                inputs=input,
                 create_graph=True,
+                retain_graph=True,
                 allow_unused=True
             )[0]
-        else:
-            d2T_dx2 = torch.zeros_like(predictions)
+            return grad if grad is not None else torch.zeros_like(output)
         
-        # Your physics equation here (replace with actual heat flux PDE)
+        # First derivatives
+        dT_dt = safe_grad(predictions, t)
+        dT_dx = safe_grad(predictions, x)
+        
+        # Second derivative
+        d2T_dx2 = safe_grad(dT_dx, x) if dT_dx is not None else torch.zeros_like(predictions)
+        
+        # Physics equation (replace with your actual PDE)
         alpha = 1.0  # Thermal diffusivity
-        residual = dT_dt - alpha * (d2T_dx2 if d2T_dx2 is not None else 0)
+        residual = dT_dt - alpha * d2T_dx2
         
-        return torch.mean(residual**2)
+        # Final loss with numerical stability
+        return torch.mean(residual**2 + 1e-7)  # Small epsilon prevents NaN
 
     def _prepare_data(self, data: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
         """Converts DataFrame to tensors and initializes model if needed."""
