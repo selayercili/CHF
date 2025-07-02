@@ -25,6 +25,14 @@ Usage:
     python scripts/train_models.py [--config CONFIG_PATH] [--debug]
 """
 
+
+import warnings
+from sklearn.exceptions import FutureWarning
+
+# Gets rid of noisy warnings from sklearn to keep output clean
+warnings.filterwarnings("ignore", category=FutureWarning, 
+                        message="'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.")
+
 import os
 import sys
 import argparse
