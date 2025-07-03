@@ -16,7 +16,7 @@ class Pinn:
     """PINN model wrapper with physics constraints for heat flux prediction."""
     
     def __init__(self, hidden_size: int = 64, learning_rate: float = 0.001, 
-                 lambda_physics: float = 0.1, **kwargs):
+                 lambda_physics: float = 0.1, decay_rate: float = 0.995 ,**kwargs):
         """
         Args:
             hidden_size: Neurons per hidden layer.
@@ -34,6 +34,8 @@ class Pinn:
         self.input_size = None
         self.input_scaler = StandardScaler()
         self.target_scaler = StandardScaler()
+        self.decay_rate = decay_rate
+        self.scheduler = None
 
     def _build_model(self, input_size: int) -> nn.Module:
         """3-layer MLP with ReLU activations."""
@@ -47,67 +49,98 @@ class Pinn:
 
     def _physics_loss(self, inputs: torch.Tensor, predictions: torch.Tensor) -> torch.Tensor:
         """
-        Ultimate robust physics loss implementation with:
-        - Guaranteed gradient tracking
-        - Full null safety
-        - Automatic graph preservation
+        Comprehensive physics loss for critical heat flux prediction.
+        Combines Zuber's correlation with energy balance constraints.
         """
-        # 1. Create fresh computation graph
-        inputs = inputs.detach().requires_grad_(True)
+        # Ensure gradient tracking
+        inputs = inputs.clone().requires_grad_(True)
         predictions = self.model(inputs)
         
-        # 2. Validate gradient requirements
-        if not predictions.requires_grad:
-            predictions = predictions.requires_grad_(True)
+        # ========================================================================
+        # 1. Extract physical parameters from input features
+        #    (MODIFY INDICES BASED ON YOUR ACTUAL DATA COLUMNS)
+        # ========================================================================
+        # Pressure [MPa] -> Pa conversion
+        pressure = inputs[:, 0] * 1e6
+        mass_flux = inputs[:, 1]        # [kg/m²s]
+        quality = inputs[:, 2]           # [-]
+        diameter = inputs[:, 3]          # [m] (hydraulic diameter)
+        length = inputs[:, 4]            # [m] (heater length)
+        T_sat = inputs[:, 5]             # [K] (saturation temperature)
+        latent_heat = inputs[:, 6]       # [J/kg]
+        liquid_density = inputs[:, 7]    # [kg/m³]
+        vapor_density = inputs[:, 8]     # [kg/m³]
+        surface_tension = inputs[:, 9]   # [N/m]
+        cp_liquid = inputs[:, 10]        # [J/kg·K]
+        viscosity = inputs[:, 11]        # [Pa·s]
+        thermal_cond = inputs[:, 12]     # [W/m·K]
         
-        # 3. Get physical dimensions - MUST MATCH YOUR DATA!
-        #    Assuming column 0 is time, column 1 is space
-        t = inputs[:, [0]]  # Keep as 2D tensor [batch, 1]
-        x = inputs[:, [1]]  # Keep as 2D tensor [batch, 1]
+        # ========================================================================
+        # 2. Calculate Critical Heat Flux using industry-standard correlations
+        # ========================================================================
+        g = 9.81  # Gravitational acceleration [m/s²]
         
-        # 4. Gradient computation with full safety
-        def safe_grad(y, x):
-            try:
-                # Create dummy grad outputs if None
-                grad_outputs = torch.ones_like(y, requires_grad=True)
-                
-                # Compute gradients
-                grads = torch.autograd.grad(
-                    outputs=y,
-                    inputs=x,
-                    grad_outputs=grad_outputs,
-                    create_graph=True,
-                    retain_graph=True,
-                    allow_unused=True,
-                    only_inputs=True
-                )[0]
-                
-                # Return zeros if None
-                return grads if grads is not None else torch.zeros_like(x)
-            except RuntimeError:
-                return torch.zeros_like(x)
+        # A. Zuber's correlation (fundamental CHF for pool boiling)
+        chf_zuber = (0.131 * latent_heat * vapor_density**0.5 * 
+                    (surface_tension * g * (liquid_density - vapor_density))**0.25)
         
-        # First derivatives
-        with torch.autograd.set_grad_enabled(True):
-            dT_dt = safe_grad(predictions, t)
-            dT_dx = safe_grad(predictions, x)
+        # B. Groeneveld correlation (flow boiling - more accurate for pipes)
+        #    CHF = 0.001 * (P^0.4) * (G^0.6) * (1 - x)^2
+        chf_groeneveld = 1e-3 * (pressure/1e6)**0.4 * mass_flux**0.6 * (1 - quality)**2
         
-        # Second derivatives
-        with torch.autograd.set_grad_enabled(True):
-            d2T_dx2 = safe_grad(dT_dx, x)
+        # C. Combine correlations with weighting factors
+        pool_weight = torch.sigmoid(-mass_flux/100)  # Weight for pool boiling
+        flow_weight = 1 - pool_weight                 # Weight for flow boiling
         
-        # 5. Physics equation (REPLACE WITH YOUR PDE)
-        alpha = 1.0  # Thermal diffusivity
-        residual = dT_dt - alpha * d2T_dx2
+        # Final CHF prediction from physics
+        chf_physics = pool_weight * chf_zuber + flow_weight * chf_groeneveld
         
-        # 6. Final loss with stability guards
-        loss = torch.mean(residual**2)
+        # ========================================================================
+        # 3. Energy balance residual (convection + conduction = CHF)
+        # ========================================================================
+        # Compute temperature gradients (for conduction term)
+        spatial_coords = inputs[:, 13:16]  # Spatial coordinates [x,y,z]
+        T_pred = predictions
         
-        # 7. Emergency fallback
-        if not torch.isfinite(loss).all() or not loss.requires_grad:
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        # Compute first derivatives
+        dT_dx = torch.autograd.grad(
+            T_pred.sum(), 
+            spatial_coords, 
+            create_graph=True,
+            retain_graph=True
+        )[0]
         
-        return loss
+        # Conduction term (Fourier's Law)
+        q_cond = -thermal_cond.unsqueeze(1) * dT_dx
+        
+        # Convection term (Newton's Law)
+        # Simplified convection coefficient (Dittus-Boelter correlation)
+        reynolds = mass_flux * diameter / viscosity
+        prandtl = cp_liquid * viscosity / thermal_cond
+        h_conv = 0.023 * thermal_cond / diameter * reynolds**0.8 * prandtl**0.4
+        q_conv = h_conv * (T_pred.squeeze() - T_sat)
+        
+        # Energy balance residual
+        energy_residual = (q_cond.norm(dim=1) + q_conv - chf_physics)   
+        
+        # ========================================================================
+        # 4. Critical heat flux residual (main physics constraint)
+        # ========================================================================
+        chf_residual = predictions.squeeze() - chf_physics
+        
+        # ========================================================================
+        # 5. Combine residuals with physics-based weighting
+        # ========================================================================
+        # Weighting factors (tunable)
+        w_chf = 0.7   # Weight for CHF constraint
+        w_energy = 0.3 # Weight for energy balance
+        
+        # Final loss
+        loss_chf = torch.mean(chf_residual**2)
+        loss_energy = torch.mean(energy_residual**2)
+        total_loss = w_chf * loss_chf + w_energy * loss_energy
+        
+        return total_loss
 
     def _prepare_data(self, data: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
         """Converts DataFrame to tensors and initializes model if needed."""
@@ -158,20 +191,59 @@ class Pinn:
             self.optimizer.step()
             total_loss += loss.item()
         
+        if self.optimizer and self.scheduler is None:
+            self.scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                self.optimizer, 
+                gamma=self.decay_rate
+        )
+    
+        if self.scheduler:
+            self.scheduler.step()
+            current_lr = self.optimizer.param_groups[0]['lr']
+            self.logger.info(f"Learning rate: {current_lr:.6f}")
+        
         avg_loss = total_loss / len(dataloader)
         self.epoch += 1
         self.is_fitted = True
         return {'loss': avg_loss, 'rmse': np.sqrt(avg_loss)}
 
     def validate(self, test_data: pd.DataFrame) -> Dict[str, float]:
-        """Validates model (physics loss not computed during validation)."""
+        """
+        Validate the model on test data with physics residual metric.
+        """
+        if not self.is_fitted or self.model is None:
+            raise ValueError("Model must be trained before validation")
+        
+        # Prepare data
         X_test, y_test = self._prepare_data(test_data)
+        
+        # Make predictions
         self.model.eval()
         with torch.no_grad():
             predictions = self.model(X_test)
-            mse = torch.nn.functional.mse_loss(predictions, y_test)
-            mae = torch.nn.functional.l1_loss(predictions, y_test)
-        return {'loss': mse.item(), 'rmse': np.sqrt(mse.item()), 'mae': mae.item()}
+        
+        # Calculate standard regression metrics
+        mse = torch.nn.functional.mse_loss(predictions, y_test)
+        rmse = torch.sqrt(mse)
+        mae = torch.nn.functional.l1_loss(predictions, y_test)
+        
+        # Initialize metrics dictionary
+        metrics = {
+            'loss': mse.item(),
+            'rmse': rmse.item(),
+            'mae': mae.item()
+        }
+        
+        # Add physics residual metric
+        try:
+            physics_residual = self._physics_loss(X_test, predictions)
+            metrics['physics_residual'] = physics_residual.item()
+        except Exception as e:
+            # Gracefully handle physics loss calculation failures
+            metrics['physics_residual'] = float('nan')
+            self.logger.warning(f"Physics residual calculation failed: {str(e)}")
+        
+        return metrics
 
     def predict(self, data: pd.DataFrame) -> np.ndarray:
         """Makes predictions (same as other models)."""
