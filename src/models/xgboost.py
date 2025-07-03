@@ -22,6 +22,7 @@ class Xgboost:
         Args:
             **kwargs: Parameters passed to xgb.XGBRegressor/XGBClassifier
         """
+        self.logger = kwargs.pop('logger', None)  # <-- Add this
         self.params = kwargs
         self.tuning_params = kwargs.pop('tuning', {})  # Extract tuning config
         
