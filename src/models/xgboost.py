@@ -68,8 +68,8 @@ class Xgboost:
                 param_grid=param_grid,
                 cv=self.tuning_params.get('cv', 5),
                 scoring=self.tuning_params.get('scoring', 'neg_mean_squared_error'),
-                verbose=1  # Reduced from 2 to 1
-        )
+                verbose=2
+            )
         else:
             search = RandomizedSearchCV(
                 estimator=self.model,
@@ -77,22 +77,16 @@ class Xgboost:
                 n_iter=self.tuning_params.get('n_iter', 10),
                 cv=self.tuning_params.get('cv', 5),
                 scoring=self.tuning_params.get('scoring', 'neg_mean_squared_error'),
-                verbose=1
+                verbose=2
             )
         
         # Run search
         search.fit(X, y)
         
-        # Log only the best parameters
-        best_params = search.best_params_
-        if self.logger:
-            self.logger.info(f"Best parameters: {best_params}")
-            self.logger.info(f"Best score (MSE): {-search.best_score_:.4f}")
-        
-        # Update model
+        # Update model with best parameters
         self.model = search.best_estimator_
-        self.params.update(best_params)
-        return best_params
+        self.params.update(search.best_params_)
+        return search.best_params_
     
     
     def train_epoch(self, train_data: pd.DataFrame, 
