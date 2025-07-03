@@ -75,12 +75,12 @@ class ModelTrainer:
         
         return config
     
-    def train_epoch(self, train_data, batch_size=32, optimizer=None):
+    #def train_epoch(self, train_data, batch_size=32, optimizer=None):
         # Debug prints
-        X, y = self._prepare_data(train_data)
-        print("\n=== Gradient Debug ===")
-        print("Input requires_grad:", X.requires_grad)
-        print("Predictions requires_grad:", self.model(X).requires_grad)
+    #    X, y = self._prepare_data(train_data)
+    #    print("\n=== Gradient Debug ===")
+    #    print("Input requires_grad:", X.requires_grad)
+    #    print("Predictions requires_grad:", self.model(X).requires_grad)
     
     def _setup_logging(self) -> logging.Logger:
         """Setup logging configuration."""
