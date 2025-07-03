@@ -16,7 +16,7 @@ xgboost:
     n_iter: 20        # For random search
     cv: 5             # Cross-validation folds
     scoring: "neg_mean_squared_error"
-  epochs: 30  
+  epochs: 100        # More trees for better convergence
 
 lightgbm:
   init_params:
@@ -47,10 +47,6 @@ pinn:
   init_params:
     hidden_size: 128
     learning_rate: 0.0001
-    lambda_physics: 0.05  # Weight for physics loss term
-    physics_weights:
-      chf: 0.7
-      energy: 0.3
-
+    lambda_physics: 0.001  # Weight for physics loss term
   epochs: 100
   batch_size: 16
