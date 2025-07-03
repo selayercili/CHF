@@ -3,13 +3,20 @@
 
 xgboost:
   init_params:
-    n_estimators: 500  # Start with more trees
-    learning_rate: 0.1
-    max_depth: 7
-    subsample: 0.8
-    colsample_bytree: 0.8
-    gamma: 0.2
-  epochs: 50  
+    objective: "reg:squarederror"
+    # Hyperparameters to tune
+    learning_rate: [0.01, 0.05, 0.1]  # Also called eta
+    max_depth: [3, 5, 7]
+    n_estimators: [100, 200, 500]
+    subsample: [0.6, 0.8, 1.0]
+    colsample_bytree: [0.6, 0.8, 1.0]
+    gamma: [0, 0.1, 0.2]
+  tuning:
+    method: "random"  # Options: grid, random
+    n_iter: 20        # For random search
+    cv: 5             # Cross-validation folds
+    scoring: "neg_mean_squared_error"
+  epochs: 100        # More trees for better convergence
 
 lightgbm:
   init_params:
