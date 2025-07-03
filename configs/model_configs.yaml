@@ -10,7 +10,6 @@ xgboost:
     colsample_bytree: 0.8
     gamma: 0.2
   epochs: 50  
-  patience: 10
 
 lightgbm:
   init_params:
