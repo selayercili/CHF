@@ -48,6 +48,6 @@ pinn:
   init_params:
     hidden_size: 128
     learning_rate: 0.0001
-    lambda_physics: 0.01  # Weight for physics loss term
-  epochs: 100
+    lambda_physics: 0.001  # Weight for physics loss term
+  epochs: 200
   batch_size: 16

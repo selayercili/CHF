@@ -6,6 +6,8 @@ import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 import pickle
+from sklearn.preprocessing import StandardScaler  # Add this import
+
 
 class NeuralNetwork:
     """Neural network model wrapper with dynamic input sizing."""
@@ -30,6 +32,8 @@ class NeuralNetwork:
         self.is_fitted = False
         self.epoch = 0
         self.input_size = None  # Will be set during first data processing
+        self.input_scaler = StandardScaler()
+        self.target_scaler = StandardScaler()
         
     def _build_model(self, input_size: int) -> nn.Module:
         """Build the neural network architecture"""
@@ -57,6 +61,14 @@ class NeuralNetwork:
         # Separate features and target
         X = data.drop(target_col, axis=1).values
         y = data[target_col].values
+        
+        # Add scaling:
+        if not self.is_fitted:
+            X = self.input_scaler.fit_transform(X)
+            y = self.target_scaler.fit_transform(y.reshape(-1, 1))
+        else:
+            X = self.input_scaler.transform(X)
+            y = self.target_scaler.transform(y.reshape(-1, 1))
         
         # Initialize model if not done yet
         if self.model is None:
@@ -181,11 +193,19 @@ class NeuralNetwork:
         
         X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
         
+        X = self.input_scaler.transform(X)  # Scale input
+        X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
+        
+        self.model.eval()
+        with torch.no_grad():
+            predictions_scaled = self.model(X_tensor).cpu().numpy()
+        
         self.model.eval()
         with torch.no_grad():
             predictions = self.model(X_tensor).cpu().numpy()
         
-        return predictions.flatten()
+        # Inverse scale predictions:
+        return self.target_scaler.inverse_transform(predictions_scaled).flatten()
     
     def save(self, path: Path, metadata: Dict[str, Any] = None):
         """
