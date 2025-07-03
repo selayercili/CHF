@@ -217,6 +217,8 @@ class ModelTrainer:
         
         # Training loop
         best_loss = float('inf')
+        patience = 0  # Initialize patience counter
+        max_patience = 5  # Stop after 5 epochs without improvement
         
         for epoch in range(epochs):
             self.logger.info(f"Epoch {epoch + 1}/{epochs}")
@@ -264,10 +266,21 @@ class ModelTrainer:
                         is_best=True
                     )
                     self.logger.info(f"Saved best model with loss: {best_loss:.4f}")
+                    patience = 0
+                else:
+                    patience += 1  # Increment patience 
+                    self.logger.info(f"No improvement. Patience: {patience}/{max_patience}")
+                    
+                # Early stopping check
+                if patience >= max_patience:
+                    self.logger.info(f"Early stopping at epoch {epoch+1}. No improvement for {max_patience} epochs.")
+                    break
                     
             except Exception as e:
                 self.logger.error(f"Error during epoch {epoch + 1}: {e}")
                 continue
+            
+
         
         self.logger.info(f"Completed training for {model_name}")
         self.logger.info(f"🎯 Best loss achieved for {model_name}: {best_loss:.6f}")
