@@ -3,20 +3,14 @@
 
 xgboost:
   init_params:
-    objective: "reg:squarederror"
-    n_estimators: 500  # Starting point
-    learning_rate: 0.05
+    n_estimators: 500  # Start with more trees
+    learning_rate: 0.1
     max_depth: 7
     subsample: 0.8
     colsample_bytree: 0.8
-    gamma: 0.1
-    reg_alpha: 0.5  # Add L1 regularization
-    reg_lambda: 0.7  # Add L2 regularization
-  tuning:
-    method: "random"
-    n_iter: 30
-    cv: 5
-  epochs: 20  # Will add 100 trees per epoch after first
+    gamma: 0.2
+  epochs: 50  
+  patience: 10
 
 lightgbm:
   init_params:
