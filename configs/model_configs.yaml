@@ -16,7 +16,7 @@ xgboost:
     n_iter: 20        # For random search
     cv: 5             # Cross-validation folds
     scoring: "neg_mean_squared_error"
-  epochs: 50        # More trees for better convergence
+  epochs: 100        # More trees for better convergence
 
 lightgbm:
   init_params:
