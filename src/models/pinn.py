@@ -10,6 +10,7 @@ import pandas as pd
 from typing import Dict, Any, Optional, Tuple  # <-- Added Tuple import
 from pathlib import Path
 import pickle
+from sklearn.preprocessing import StandardScaler
 
 class Pinn:
     """PINN model wrapper with physics constraints for heat flux prediction."""
@@ -31,6 +32,8 @@ class Pinn:
         self.is_fitted = False
         self.epoch = 0
         self.input_size = None
+        self.input_scaler = StandardScaler()
+        self.target_scaler = StandardScaler()
 
     def _build_model(self, input_size: int) -> nn.Module:
         """3-layer MLP with ReLU activations."""
@@ -112,6 +115,14 @@ class Pinn:
         X = data.drop(target_col, axis=1).values
         y = data[target_col].values
         
+        # Add scaling:
+        if not self.is_fitted:
+            X = self.input_scaler.fit_transform(X)
+            y = self.target_scaler.fit_transform(y.reshape(-1, 1))
+        else:
+            X = self.input_scaler.transform(X)
+            y = self.target_scaler.transform(y.reshape(-1, 1))
+        
         if self.model is None:
             self.input_size = X.shape[1]
             self.model = self._build_model(self.input_size)
@@ -169,12 +180,22 @@ class Pinn:
             X = data.drop(target_col, axis=1).values
         else:
             X = data.values
+            
+        X = self.input_scaler.transform(X)  # Scale input
+        X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
+        
+        self.model.eval()
+        with torch.no_grad():
+            predictions_scaled = self.model(X_tensor).cpu().numpy()
         
         X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
         self.model.eval()
         with torch.no_grad():
             predictions = self.model(X_tensor).cpu().numpy()
-        return predictions.flatten()
+            
+            
+        # Inverse scale predictions:
+        return self.target_scaler.inverse_transform(predictions_scaled).flatten()
 
     def save(self, path: Path, metadata: Dict[str, Any] = None):
         """Saves model state."""

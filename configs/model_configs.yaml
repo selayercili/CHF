@@ -49,5 +49,5 @@ pinn:
     hidden_size: 128
     learning_rate: 0.0001
     lambda_physics: 0.001  # Weight for physics loss term
-  epochs: 200
+  epochs: 100
   batch_size: 16
