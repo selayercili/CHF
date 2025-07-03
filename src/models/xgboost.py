@@ -112,18 +112,20 @@ class Xgboost:
         
         X_train, y_train = self._prepare_data(train_data)
         
+        # First epoch: build all trees
         if not self.is_fitted:
-            # Tune if configured
+            # Hyperparameter tuning first
             if hasattr(self, 'tuning_params') and self.tuning_params:
                 best_params = self.tune(train_data)
-                print(f"Tuned parameters: {best_params}")
-        
-            # Train full model
+                self.logger.info(f"Tuned parameters: {best_params}")
+            
+            # Train full model with all trees
             self.model.fit(X_train, y_train)
             self.is_fitted = True
         else:
-            # Continue training (add one tree)
-            self.model.set_params(n_estimators=self.model.n_estimators + 1)
+            # Subsequent epochs: add more trees
+            current_estimators = self.model.n_estimators
+            self.model.set_params(n_estimators=current_estimators + 100)  # Add 100 trees
             self.model.fit(X_train, y_train, xgb_model=self.model.get_booster())
         
         # For XGBoost, we fit the entire model at once
