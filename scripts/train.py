@@ -201,6 +201,7 @@ class ModelTrainer:
             
             if 'tuning' in model_config:
                 model.tuning_params = model_config['tuning']
+                model.logger = self.logger
                 
             self.logger.info(f"Initialized {model_name} with config: {model_config}")
         except Exception as e:

@@ -22,7 +22,7 @@ class Xgboost:
         Args:
             **kwargs: Parameters passed to xgb.XGBRegressor/XGBClassifier
         """
-        
+        self.params = kwargs
         self.tuning_params = kwargs.pop('tuning', {})  # Extract tuning config
         
         # Determine if it's a classification or regression task
