@@ -198,6 +198,10 @@ class ModelTrainer:
         # Initialize model
         try:
             model = model_class(**model_config.get('init_params', {}))
+            
+            if 'tuning' in model_config:
+                model.tuning_params = model_config['tuning']
+                
             self.logger.info(f"Initialized {model_name} with config: {model_config}")
         except Exception as e:
             self.logger.error(f"Failed to initialize {model_name}: {e}")

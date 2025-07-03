@@ -10,7 +10,7 @@ import xgboost as xgb
 from typing import Dict, Any, Optional, Tuple
 import pickle
 from pathlib import Path
-
+from sklearn.model_selection import RandomizedSearchCV, GridSearchCV 
 
 class Xgboost:
     """XGBoost model wrapper for the training pipeline."""
@@ -22,6 +22,9 @@ class Xgboost:
         Args:
             **kwargs: Parameters passed to xgb.XGBRegressor/XGBClassifier
         """
+        
+        self.tuning_params = kwargs.pop('tuning', {})  # Extract tuning config
+        
         # Determine if it's a classification or regression task
         objective = kwargs.get('objective', 'reg:squarederror')
         
@@ -33,7 +36,7 @@ class Xgboost:
             self.task_type = 'regression'
         
         self.is_fitted = False
-        
+
     def _prepare_data(self, data: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
         """
         Prepare data for training/validation.
@@ -50,6 +53,41 @@ class Xgboost:
         
         return X, y
     
+    def tune(self, train_data: pd.DataFrame):
+        """Perform hyperparameter tuning"""
+        X, y = self._prepare_data(train_data)
+        
+        # Create parameter grid
+        param_grid = {k: v for k, v in self.params.items() if isinstance(v, list)}
+        
+        # Select tuning method
+        if self.tuning_params.get('method', 'random') == 'grid':
+            search = GridSearchCV(
+                estimator=self.model,
+                param_grid=param_grid,
+                cv=self.tuning_params.get('cv', 5),
+                scoring=self.tuning_params.get('scoring', 'neg_mean_squared_error'),
+                verbose=2
+            )
+        else:
+            search = RandomizedSearchCV(
+                estimator=self.model,
+                param_distributions=param_grid,
+                n_iter=self.tuning_params.get('n_iter', 10),
+                cv=self.tuning_params.get('cv', 5),
+                scoring=self.tuning_params.get('scoring', 'neg_mean_squared_error'),
+                verbose=2
+            )
+        
+        # Run search
+        search.fit(X, y)
+        
+        # Update model with best parameters
+        self.model = search.best_estimator_
+        self.params.update(search.best_params_)
+        return search.best_params_
+    
+    
     def train_epoch(self, train_data: pd.DataFrame, 
                    batch_size: int = None,
                    optimizer: Any = None) -> Dict[str, float]:
@@ -64,6 +102,11 @@ class Xgboost:
         Returns:
             Dictionary of training metrics
         """
+        # Add tuning before training if configured
+        if not self.is_fitted and self.tuning_params:
+            best_params = self.tune(train_data)
+            print(f"Tuned parameters: {best_params}")
+        
         X_train, y_train = self._prepare_data(train_data)
         
         # For XGBoost, we fit the entire model at once
