@@ -16,7 +16,7 @@ xgboost:
     n_iter: 20        # For random search
     cv: 5             # Cross-validation folds
     scoring: "neg_mean_squared_error"
-  epochs: 100        # More trees for better convergence
+  epochs: 30        # More trees for better convergence
 
 lightgbm:
   init_params:
@@ -43,11 +43,15 @@ svm:
     gamma: 'scale'      # Kernel coefficient
   epochs: 1             # SVM trains fully in one epoch
 
+# Add this to your configs/model_configs.yaml file
+
 pinn:
   init_params:
-    hidden_size: 64
-    learning_rate: 0.001
-    lambda_physics: 0.1
-  epochs: 50
-  batch_size: 32
-  learning_rate: 0.001
+    hidden_size: 128           # Increased for more capacity
+    learning_rate: 0.0005      # Reduced learning rate
+    lambda_physics: 0.01       # Much smaller physics weight
+    debug: true                # Enable debugging
+    physics_warmup_epochs: 10  # Gradual physics introduction
+  epochs: 100                  # More epochs with patience
+  batch_size: 64              # Larger batch size for stability
+  learning_rate: 0.0005       # Consistent with init_params

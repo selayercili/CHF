@@ -16,12 +16,12 @@ class Pinn:
     """PINN model wrapper with physics constraints for heat flux prediction."""
     
     def __init__(self, hidden_size: int = 64, learning_rate: float = 0.001, 
-                 lambda_physics: float = 0.1, **kwargs):
+                 lambda_physics: float = 0.01, **kwargs):  # Reduced physics weight
         """
         Args:
             hidden_size: Neurons per hidden layer.
             learning_rate: Optimizer learning rate.
-            lambda_physics: Weight for physics loss term.
+            lambda_physics: Weight for physics loss term (reduced default).
         """
         self.hidden_size = hidden_size
         self.learning_rate = learning_rate
@@ -34,36 +34,36 @@ class Pinn:
         self.input_size = None
         self.input_scaler = StandardScaler()
         self.target_scaler = StandardScaler()
+        
+        # Add debugging flags
+        self.debug = kwargs.get('debug', False)
+        self.physics_warmup_epochs = kwargs.get('physics_warmup_epochs', 10)  # Gradually introduce physics
 
     def _build_model(self, input_size: int) -> nn.Module:
-        """3-layer MLP with ReLU activations."""
-        return nn.Sequential(
+        """Enhanced 4-layer MLP with better initialization and dropout."""
+        model = nn.Sequential(
             nn.Linear(input_size, self.hidden_size),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(self.hidden_size, self.hidden_size),
             nn.ReLU(),
-            nn.Linear(self.hidden_size, 1)
+            nn.Dropout(0.1),
+            nn.Linear(self.hidden_size, self.hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size // 2, 1)
         ).to(self.device)
+        
+        # Better weight initialization
+        for layer in model:
+            if isinstance(layer, nn.Linear):
+                torch.nn.init.xavier_uniform_(layer.weight)
+                torch.nn.init.zeros_(layer.bias)
+        
+        return model
 
     def _physics_loss(self, inputs: torch.Tensor, predictions: torch.Tensor) -> torch.Tensor:
         """
-        CHF Physics-Informed Loss Implementation
-        
-        Incorporates three key physics principles for critical heat flux:
-        1. Energy balance: Heat input = Heat removed by fluid
-        2. Momentum balance: Pressure drop relationships  
-        3. Mass conservation: Continuity equation
-        
-        Input columns (based on your data):
-        0: pressure_MPa
-        1: mass_flux_kg_m2_s  
-        2: x_e_out (exit quality)
-        3: D_e_mm (equivalent diameter)
-        4: D_h_mm (hydraulic diameter) 
-        5: length_mm
-        6: geometry_encoded
-        
-        Output: CHF in MW/m²
+        Improved CHF Physics-Informed Loss with better balance and debugging
         """
         # Enable gradients for physics constraints
         inputs = inputs.detach().requires_grad_(True)
@@ -72,38 +72,21 @@ class Pinn:
         if not predictions.requires_grad:
             predictions = predictions.requires_grad_(True)
         
-        # Extract physical parameters
-        pressure = inputs[:, 0] * 1e6  # Convert MPa to Pa
-        mass_flux = inputs[:, 1]       # kg/m²/s
-        x_exit = inputs[:, 2]          # Exit quality
-        D_e = inputs[:, 3] * 1e-3      # Convert mm to m
-        D_h = inputs[:, 4] * 1e-3      # Convert mm to m  
-        length = inputs[:, 5] * 1e-3   # Convert mm to m
+        # Extract physical parameters (assuming your column order)
+        # Adjust indices based on your actual column order after dropping target
+        pressure = inputs[:, 0]        # pressure_MPa (already scaled)
+        mass_flux = inputs[:, 1]       # mass_flux_kg_m2_s (already scaled)
+        x_exit = inputs[:, 2]          # x_e_out (already scaled)
+        D_e = inputs[:, 3]             # D_e_mm (already scaled)
+        D_h = inputs[:, 4]             # D_h_mm (already scaled)
+        length = inputs[:, 5]          # length_mm (already scaled)
         
-        # CHF prediction (MW/m²)
-        chf_pred = predictions.squeeze() * 1e6  # Convert to W/m²
+        # CHF prediction (already scaled)
+        chf_pred = predictions.squeeze()
         
         physics_losses = []
         
-        # 1. ENERGY BALANCE CONSTRAINT
-        # Heat input should equal heat removed by fluid
-        # Q = m_dot * h_fg * (quality change)
-        # Assuming inlet quality ≈ 0 for subcooled inlet
-        h_fg = 2.26e6  # Latent heat of vaporization (J/kg) - approximate for water
-        
-        # Energy balance: CHF * Area = mass_flux * h_fg * x_exit * Area
-        # Simplifies to: CHF = mass_flux * h_fg * x_exit
-        energy_balance = chf_pred - mass_flux * h_fg * x_exit
-        energy_loss = torch.mean(energy_balance**2)
-        physics_losses.append(energy_loss)
-        
-        # 2. MOMENTUM BALANCE CONSTRAINT  
-        # Pressure drop should be consistent with flow physics
-        # For two-phase flow: ΔP = f * (L/D) * (ρv²/2) * Φ²
-        # where Φ is two-phase multiplier
-        
-        # Simplified momentum constraint: higher mass flux → higher pressure drop needed
-        # This creates a physical relationship between pressure, mass flux, and geometry
+        # Safe gradient computation
         def safe_grad(y, x):
             try:
                 grad_outputs = torch.ones_like(y, requires_grad=True)
@@ -120,40 +103,37 @@ class Pinn:
             except RuntimeError:
                 return torch.zeros_like(x)
         
-        # Momentum balance: dCHF/dG should be positive (higher mass flux → higher CHF)
+        # 1. MONOTONICITY CONSTRAINTS (most important and stable)
+        # CHF should increase with mass flux
         dCHF_dG = safe_grad(chf_pred, mass_flux)
-        momentum_constraint = torch.relu(-dCHF_dG)  # Penalize negative gradients
-        momentum_loss = torch.mean(momentum_constraint**2)
-        physics_losses.append(momentum_loss)
+        monotonic_mass_flux = torch.relu(-dCHF_dG)  # Penalize negative gradients
+        physics_losses.append(torch.mean(monotonic_mass_flux**2))
         
-        # 3. GEOMETRIC SCALING CONSTRAINT
-        # CHF should scale appropriately with hydraulic diameter
-        # Smaller channels typically have higher CHF due to surface tension effects
-        dCHF_dDh = safe_grad(chf_pred, D_h)
-        geometric_constraint = torch.relu(dCHF_dDh)  # Penalize positive gradients (CHF should decrease with diameter)
-        geometric_loss = torch.mean(geometric_constraint**2)
-        physics_losses.append(geometric_loss)
-        
-        # 4. PRESSURE DEPENDENCY CONSTRAINT
-        # CHF typically increases with pressure (up to critical pressure)
-        # This is a well-known physical relationship
+        # CHF should increase with pressure (generally)
         dCHF_dP = safe_grad(chf_pred, pressure)
-        pressure_constraint = torch.relu(-dCHF_dP)  # Penalize negative gradients
-        pressure_loss = torch.mean(pressure_constraint**2)
-        physics_losses.append(pressure_loss)
+        monotonic_pressure = torch.relu(-dCHF_dP)  # Penalize negative gradients
+        physics_losses.append(torch.mean(monotonic_pressure**2))
         
-        # 5. PHYSICAL BOUNDS CONSTRAINT
-        # CHF should be within reasonable physical bounds
-        # Typical CHF values: 0.1 to 50 MW/m²
-        chf_MW = chf_pred / 1e6  # Convert back to MW/m²
-        lower_bound = torch.relu(0.1 - chf_MW)  # Penalize values below 0.1 MW/m²
-        upper_bound = torch.relu(chf_MW - 50.0)  # Penalize values above 50 MW/m²
-        bounds_loss = torch.mean(lower_bound**2) + torch.mean(upper_bound**2)
-        physics_losses.append(bounds_loss)
+        # 2. SIMPLIFIED PHYSICAL BOUNDS (more lenient)
+        # CHF should be positive and reasonable
+        negative_chf = torch.relu(-chf_pred)  # Penalize negative predictions
+        physics_losses.append(torch.mean(negative_chf**2))
         
-        # Combine all physics losses with weights
-        weights = [1.0, 0.5, 0.3, 0.5, 0.2]  # Adjust these based on importance
+        # 3. CONSISTENCY CONSTRAINTS (lighter weight)
+        # Higher quality exit should relate to higher CHF capability
+        dCHF_dx = safe_grad(chf_pred, x_exit)
+        quality_consistency = torch.relu(-dCHF_dx)  # Should be positive relationship
+        physics_losses.append(torch.mean(quality_consistency**2))
+        
+        # Combine physics losses with adaptive weights
+        # Start with lighter physics constraints
+        weights = [0.3, 0.2, 0.5, 0.1]  # Reduced weights
         total_physics_loss = sum(w * loss for w, loss in zip(weights, physics_losses))
+        
+        # Debug logging
+        if self.debug and torch.rand(1).item() < 0.01:  # Log 1% of batches
+            print(f"Physics losses: {[f'{loss.item():.6f}' for loss in physics_losses]}")
+            print(f"Total physics loss: {total_physics_loss.item():.6f}")
         
         # Safety checks
         if not torch.isfinite(total_physics_loss).all() or not total_physics_loss.requires_grad:
@@ -167,13 +147,13 @@ class Pinn:
         X = data.drop(target_col, axis=1).values
         y = data[target_col].values
         
-        # Add scaling:
+        # Add scaling with better handling
         if not self.is_fitted:
             X = self.input_scaler.fit_transform(X)
-            y = self.target_scaler.fit_transform(y.reshape(-1, 1))
+            y = self.target_scaler.fit_transform(y.reshape(-1, 1)).flatten()
         else:
             X = self.input_scaler.transform(X)
-            y = self.target_scaler.transform(y.reshape(-1, 1))
+            y = self.target_scaler.transform(y.reshape(-1, 1)).flatten()
         
         if self.model is None:
             self.input_size = X.shape[1]
@@ -181,46 +161,86 @@ class Pinn:
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
         
         X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
-        y_tensor = torch.tensor(y, dtype=torch.float32).view(-1, 1).to(self.device)
+        y_tensor = torch.tensor(y, dtype=torch.float32).to(self.device)
         return X_tensor, y_tensor
 
     def train_epoch(self, train_data: pd.DataFrame, batch_size: int = 32, 
                    optimizer: Any = None) -> Dict[str, float]:
-        """Trains for one epoch with composite loss (data + physics)."""
+        """Trains for one epoch with adaptive physics loss weighting."""
         X_train, y_train = self._prepare_data(train_data)
         dataset = torch.utils.data.TensorDataset(X_train, y_train)
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
         
         self.model.train()
         total_loss = 0.0
+        total_data_loss = 0.0
+        total_physics_loss = 0.0
         
-        for inputs, targets in dataloader:
+        # Adaptive physics weight (gradual introduction)
+        current_physics_weight = self.lambda_physics
+        if self.epoch < self.physics_warmup_epochs:
+            # Gradually increase physics weight
+            current_physics_weight = self.lambda_physics * (self.epoch / self.physics_warmup_epochs)
+        
+        for batch_idx, (inputs, targets) in enumerate(dataloader):
             self.optimizer.zero_grad()
             outputs = self.model(inputs)
             
             # Data loss (MSE)
-            data_loss = torch.nn.functional.mse_loss(outputs, targets)
+            data_loss = torch.nn.functional.mse_loss(outputs.squeeze(), targets)
             
-            # Physics loss
+            # Physics loss (with adaptive weight)
             physics_loss = self._physics_loss(inputs, outputs)
             
             # Combined loss
-            loss = data_loss + self.lambda_physics * physics_loss
+            loss = data_loss + current_physics_weight * physics_loss
+            
+            # Check for NaN/Inf
+            if not torch.isfinite(loss):
+                print(f"Warning: Non-finite loss at epoch {self.epoch}, batch {batch_idx}")
+                continue
+            
             loss.backward()
+            
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            
             self.optimizer.step()
+            
             total_loss += loss.item()
+            total_data_loss += data_loss.item()
+            total_physics_loss += physics_loss.item()
         
         avg_loss = total_loss / len(dataloader)
+        avg_data_loss = total_data_loss / len(dataloader)
+        avg_physics_loss = total_physics_loss / len(dataloader)
+        
         self.epoch += 1
         self.is_fitted = True
-        return {'loss': avg_loss, 'rmse': np.sqrt(avg_loss)}
+        
+        # Enhanced metrics
+        metrics = {
+            'loss': avg_loss,
+            'rmse': np.sqrt(avg_data_loss),
+            'data_loss': avg_data_loss,
+            'physics_loss': avg_physics_loss,
+            'physics_weight': current_physics_weight
+        }
+        
+        # Debug output
+        if self.debug:
+            print(f"Epoch {self.epoch}: Data Loss: {avg_data_loss:.6f}, "
+                  f"Physics Loss: {avg_physics_loss:.6f}, "
+                  f"Physics Weight: {current_physics_weight:.6f}")
+        
+        return metrics
 
     def validate(self, test_data: pd.DataFrame) -> Dict[str, float]:
         """Validates model (physics loss not computed during validation)."""
         X_test, y_test = self._prepare_data(test_data)
         self.model.eval()
         with torch.no_grad():
-            predictions = self.model(X_test)
+            predictions = self.model(X_test).squeeze()
             mse = torch.nn.functional.mse_loss(predictions, y_test)
             mae = torch.nn.functional.l1_loss(predictions, y_test)
         return {'loss': mse.item(), 'rmse': np.sqrt(mse.item()), 'mae': mae.item()}
@@ -238,15 +258,10 @@ class Pinn:
         
         self.model.eval()
         with torch.no_grad():
-            predictions_scaled = self.model(X_tensor).cpu().numpy()
+            predictions_scaled = self.model(X_tensor).squeeze().cpu().numpy()
         
-        X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
-        self.model.eval()
-        with torch.no_grad():
-            predictions = self.model(X_tensor).cpu().numpy()
-            
-            
-        # Inverse scale predictions:
+        # Inverse scale predictions
+        predictions_scaled = predictions_scaled.reshape(-1, 1)
         return self.target_scaler.inverse_transform(predictions_scaled).flatten()
 
     def save(self, path: Path, metadata: Dict[str, Any] = None):
