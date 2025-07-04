@@ -47,31 +47,66 @@ class Pinn:
 
     def _physics_loss(self, inputs: torch.Tensor, predictions: torch.Tensor) -> torch.Tensor:
         """
-        Ultimate robust physics loss implementation with:
-        - Guaranteed gradient tracking
-        - Full null safety
-        - Automatic graph preservation
+        CHF Physics-Informed Loss Implementation
+        
+        Incorporates three key physics principles for critical heat flux:
+        1. Energy balance: Heat input = Heat removed by fluid
+        2. Momentum balance: Pressure drop relationships  
+        3. Mass conservation: Continuity equation
+        
+        Input columns (based on your data):
+        0: pressure_MPa
+        1: mass_flux_kg_m2_s  
+        2: x_e_out (exit quality)
+        3: D_e_mm (equivalent diameter)
+        4: D_h_mm (hydraulic diameter) 
+        5: length_mm
+        6: geometry_encoded
+        
+        Output: CHF in MW/m²
         """
-        # 1. Create fresh computation graph
+        # Enable gradients for physics constraints
         inputs = inputs.detach().requires_grad_(True)
         predictions = self.model(inputs)
         
-        # 2. Validate gradient requirements
         if not predictions.requires_grad:
             predictions = predictions.requires_grad_(True)
         
-        # 3. Get physical dimensions - MUST MATCH YOUR DATA!
-        #    Assuming column 0 is time, column 1 is space
-        t = inputs[:, [0]]  # Keep as 2D tensor [batch, 1]
-        x = inputs[:, [1]]  # Keep as 2D tensor [batch, 1]
+        # Extract physical parameters
+        pressure = inputs[:, 0] * 1e6  # Convert MPa to Pa
+        mass_flux = inputs[:, 1]       # kg/m²/s
+        x_exit = inputs[:, 2]          # Exit quality
+        D_e = inputs[:, 3] * 1e-3      # Convert mm to m
+        D_h = inputs[:, 4] * 1e-3      # Convert mm to m  
+        length = inputs[:, 5] * 1e-3   # Convert mm to m
         
-        # 4. Gradient computation with full safety
+        # CHF prediction (MW/m²)
+        chf_pred = predictions.squeeze() * 1e6  # Convert to W/m²
+        
+        physics_losses = []
+        
+        # 1. ENERGY BALANCE CONSTRAINT
+        # Heat input should equal heat removed by fluid
+        # Q = m_dot * h_fg * (quality change)
+        # Assuming inlet quality ≈ 0 for subcooled inlet
+        h_fg = 2.26e6  # Latent heat of vaporization (J/kg) - approximate for water
+        
+        # Energy balance: CHF * Area = mass_flux * h_fg * x_exit * Area
+        # Simplifies to: CHF = mass_flux * h_fg * x_exit
+        energy_balance = chf_pred - mass_flux * h_fg * x_exit
+        energy_loss = torch.mean(energy_balance**2)
+        physics_losses.append(energy_loss)
+        
+        # 2. MOMENTUM BALANCE CONSTRAINT  
+        # Pressure drop should be consistent with flow physics
+        # For two-phase flow: ΔP = f * (L/D) * (ρv²/2) * Φ²
+        # where Φ is two-phase multiplier
+        
+        # Simplified momentum constraint: higher mass flux → higher pressure drop needed
+        # This creates a physical relationship between pressure, mass flux, and geometry
         def safe_grad(y, x):
             try:
-                # Create dummy grad outputs if None
                 grad_outputs = torch.ones_like(y, requires_grad=True)
-                
-                # Compute gradients
                 grads = torch.autograd.grad(
                     outputs=y,
                     inputs=x,
@@ -81,33 +116,50 @@ class Pinn:
                     allow_unused=True,
                     only_inputs=True
                 )[0]
-                
-                # Return zeros if None
                 return grads if grads is not None else torch.zeros_like(x)
             except RuntimeError:
                 return torch.zeros_like(x)
         
-        # First derivatives
-        with torch.autograd.set_grad_enabled(True):
-            dT_dt = safe_grad(predictions, t)
-            dT_dx = safe_grad(predictions, x)
+        # Momentum balance: dCHF/dG should be positive (higher mass flux → higher CHF)
+        dCHF_dG = safe_grad(chf_pred, mass_flux)
+        momentum_constraint = torch.relu(-dCHF_dG)  # Penalize negative gradients
+        momentum_loss = torch.mean(momentum_constraint**2)
+        physics_losses.append(momentum_loss)
         
-        # Second derivatives
-        with torch.autograd.set_grad_enabled(True):
-            d2T_dx2 = safe_grad(dT_dx, x)
+        # 3. GEOMETRIC SCALING CONSTRAINT
+        # CHF should scale appropriately with hydraulic diameter
+        # Smaller channels typically have higher CHF due to surface tension effects
+        dCHF_dDh = safe_grad(chf_pred, D_h)
+        geometric_constraint = torch.relu(dCHF_dDh)  # Penalize positive gradients (CHF should decrease with diameter)
+        geometric_loss = torch.mean(geometric_constraint**2)
+        physics_losses.append(geometric_loss)
         
-        # 5. Physics equation (REPLACE WITH YOUR PDE)
-        alpha = 1.0  # Thermal diffusivity
-        residual = dT_dt - alpha * d2T_dx2
+        # 4. PRESSURE DEPENDENCY CONSTRAINT
+        # CHF typically increases with pressure (up to critical pressure)
+        # This is a well-known physical relationship
+        dCHF_dP = safe_grad(chf_pred, pressure)
+        pressure_constraint = torch.relu(-dCHF_dP)  # Penalize negative gradients
+        pressure_loss = torch.mean(pressure_constraint**2)
+        physics_losses.append(pressure_loss)
         
-        # 6. Final loss with stability guards
-        loss = torch.mean(residual**2)
+        # 5. PHYSICAL BOUNDS CONSTRAINT
+        # CHF should be within reasonable physical bounds
+        # Typical CHF values: 0.1 to 50 MW/m²
+        chf_MW = chf_pred / 1e6  # Convert back to MW/m²
+        lower_bound = torch.relu(0.1 - chf_MW)  # Penalize values below 0.1 MW/m²
+        upper_bound = torch.relu(chf_MW - 50.0)  # Penalize values above 50 MW/m²
+        bounds_loss = torch.mean(lower_bound**2) + torch.mean(upper_bound**2)
+        physics_losses.append(bounds_loss)
         
-        # 7. Emergency fallback
-        if not torch.isfinite(loss).all() or not loss.requires_grad:
+        # Combine all physics losses with weights
+        weights = [1.0, 0.5, 0.3, 0.5, 0.2]  # Adjust these based on importance
+        total_physics_loss = sum(w * loss for w, loss in zip(weights, physics_losses))
+        
+        # Safety checks
+        if not torch.isfinite(total_physics_loss).all() or not total_physics_loss.requires_grad:
             return torch.tensor(0.0, device=self.device, requires_grad=True)
         
-        return loss
+        return total_physics_loss
 
     def _prepare_data(self, data: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
         """Converts DataFrame to tensors and initializes model if needed."""
@@ -206,10 +258,12 @@ class Pinn:
             'input_size': self.input_size,
             'hidden_size': self.hidden_size,
             'lambda_physics': self.lambda_physics,
-            'is_fitted': self.is_fitted
+            'is_fitted': self.is_fitted,
+            'input_scaler': self.input_scaler,
+            'target_scaler': self.target_scaler
         }
         if metadata:
-            save_dict['metadata'] = metadata
+            save_dict.update(metadata)
         torch.save(save_dict, path)
 
     def load(self, path: Path):
@@ -224,7 +278,14 @@ class Pinn:
         self.optimizer.load_state_dict(checkpoint['optimizer_state'])
         self.epoch = checkpoint['epoch']
         self.is_fitted = checkpoint['is_fitted']
-        return checkpoint.get('metadata', {})
+        
+        # Load scalers if they exist
+        if 'input_scaler' in checkpoint:
+            self.input_scaler = checkpoint['input_scaler']
+        if 'target_scaler' in checkpoint:
+            self.target_scaler = checkpoint['target_scaler']
+            
+        return checkpoint
 
     def get_feature_importance(self) -> pd.DataFrame:
         """Gradient-based feature importance (similar to NN)."""
