@@ -248,7 +248,7 @@ class ModelTester:
                 else:
                     # Fallback for generic PyTorch models
                     import torch
-                    checkpoint = torch.load(weights_path, map_location='cpu')
+                    checkpoint = torch.load(weights_path, map_location='cpu',weights_only=False)
                     if 'model_state_dict' in checkpoint:
                         model.load_state_dict(checkpoint['model_state_dict'])
                     elif 'model' in checkpoint:
