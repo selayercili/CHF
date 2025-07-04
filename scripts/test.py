@@ -229,19 +229,33 @@ class ModelTester:
             self.logger.error(f"Failed to initialize {model_name}: {e}")
             return None
         
-        # Load weights
+        # Load weights - FIXED SECTION
         try:
-            if hasattr(model, 'load'):
-                metadata = model.load(weights_path)
-                self.logger.info(f"Loaded model from epoch: {metadata.get('epoch', 'unknown')}")
+            # Check if this is a PyTorch model with custom load method (NN or PINN)
+            if model_name.lower() in ['neural_network', 'nn', 'pinn']:
+                # Use the custom load method for PyTorch models
+                if hasattr(model, 'load'):
+                    metadata = model.load(weights_path)
+                    self.logger.info(f"Loaded PyTorch model from epoch: {getattr(model, 'epoch', 'unknown')}")
+                else:
+                    self.logger.error(f"Model {model_name} doesn't have a load method")
+                    return None
             else:
-                # For PyTorch models
-                import torch
-                checkpoint = torch.load(weights_path)
-                if 'model_state_dict' in checkpoint:
-                    model.load_state_dict(checkpoint['model_state_dict'])
-                elif 'model' in checkpoint:
-                    model = checkpoint['model']
+                # For other models (TensorFlow/Keras models)
+                if hasattr(model, 'load'):
+                    metadata = model.load(weights_path)
+                    self.logger.info(f"Loaded model from epoch: {metadata.get('epoch', 'unknown')}")
+                else:
+                    # Fallback for generic PyTorch models
+                    import torch
+                    checkpoint = torch.load(weights_path, map_location='cpu')
+                    if 'model_state_dict' in checkpoint:
+                        model.load_state_dict(checkpoint['model_state_dict'])
+                    elif 'model' in checkpoint:
+                        model = checkpoint['model']
+                    else:
+                        self.logger.error(f"Unknown checkpoint format for {model_name}")
+                        return None
         except Exception as e:
             self.logger.error(f"Failed to load weights for {model_name}: {e}")
             return None
@@ -443,7 +457,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
