@@ -229,7 +229,7 @@ class ModelTester:
             self.logger.error(f"Failed to initialize {model_name}: {e}")
             return None
         
-        # Load weights - FIXED SECTION
+        # Load weights - still broken
         try:
             # Check if this is a PyTorch model with custom load method (NN or PINN)
             if model_name.lower() in ['neural_network', 'pinn']:
