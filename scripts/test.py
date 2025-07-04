@@ -232,7 +232,7 @@ class ModelTester:
         # Load weights - FIXED SECTION
         try:
             # Check if this is a PyTorch model with custom load method (NN or PINN)
-            if model_name.lower() in ['neural_network', 'nn', 'pinn']:
+            if model_name.lower() in ['neural_network', 'pinn']:
                 # Use the custom load method for PyTorch models
                 if hasattr(model, 'load'):
                     metadata = model.load(weights_path)
