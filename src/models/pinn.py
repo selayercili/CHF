@@ -282,8 +282,15 @@ class Pinn:
         torch.save(save_dict, path)
 
     def load(self, path: Path):
-        """Loads model state."""
-        checkpoint = torch.load(path, map_location=self.device)
+        """Loads model state with proper handling of sklearn objects."""
+        from sklearn.preprocessing import StandardScaler
+        
+        # Add safe globals for sklearn objects
+        torch.serialization.add_safe_globals([StandardScaler])
+        
+        # Load with weights_only=False since we have sklearn objects
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        
         self.input_size = checkpoint['input_size']
         self.hidden_size = checkpoint['hidden_size']
         self.lambda_physics = checkpoint['lambda_physics']
