@@ -3,7 +3,7 @@
 
 import numpy as np
 import logging
-from typing import Optional, Callable
+from typing import Optional, Callable, Any
 
 logger = logging.getLogger(__name__)
 
