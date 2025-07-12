@@ -1,0 +1,161 @@
+# configs/logging_config.yaml
+# Centralized logging configuration for the CHF project
+
+logging:
+  # Global settings
+  version: 1
+  disable_existing_loggers: false
+  
+  # Log levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  root_level: INFO
+  
+  # Formatters
+  formatters:
+    standard:
+      format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+      datefmt: "%Y-%m-%d %H:%M:%S"
+    
+    detailed:
+      format: "%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(funcName)s() - %(message)s"
+      datefmt: "%Y-%m-%d %H:%M:%S"
+    
+    simple:
+      format: "%(levelname)s - %(message)s"
+
+  # Handlers
+  handlers:
+    console:
+      class: logging.StreamHandler
+      level: INFO
+      formatter: standard
+      stream: ext://sys.stdout
+    
+    file:
+      class: logging.handlers.RotatingFileHandler
+      level: DEBUG
+      formatter: detailed
+      filename: logs/chf_project.log
+      maxBytes: 10485760  # 10MB
+      backupCount: 5
+      encoding: utf8
+    
+    error_file:
+      class: logging.handlers.RotatingFileHandler
+      level: ERROR
+      formatter: detailed
+      filename: logs/errors.log
+      maxBytes: 10485760  # 10MB
+      backupCount: 5
+      encoding: utf8
+    
+    training_file:
+      class: logging.FileHandler
+      level: DEBUG
+      formatter: detailed
+      filename: logs/training_{timestamp}.log
+      encoding: utf8
+    
+    evaluation_file:
+      class: logging.FileHandler
+      level: DEBUG
+      formatter: detailed
+      filename: logs/evaluation_{timestamp}.log
+      encoding: utf8
+
+  # Loggers
+  loggers:
+    # Data processing logger
+    data:
+      level: INFO
+      handlers: [console, file]
+      propagate: false
+    
+    # Model training logger
+    training:
+      level: DEBUG
+      handlers: [console, training_file, error_file]
+      propagate: false
+    
+    # Model evaluation logger
+    evaluation:
+      level: DEBUG
+      handlers: [console, evaluation_file, error_file]
+      propagate: false
+    
+    # Physics (PINN) logger
+    physics:
+      level: DEBUG
+      handlers: [console, file]
+      propagate: false
+    
+    # Utils logger
+    utils:
+      level: INFO
+      handlers: [file]
+      propagate: false
+
+  # Root logger
+  root:
+    level: INFO
+    handlers: [console, file, error_file]
+
+# Progress Bar Settings
+progress_bars:
+  enabled: true
+  leave_bars: false  # Whether to leave progress bars after completion
+  ascii: false  # Use ASCII characters for compatibility
+  ncols: 100  # Width of progress bars
+
+# Tensorboard Settings
+tensorboard:
+  enabled: true
+  log_dir: logs/tensorboard
+  flush_secs: 30
+  log_scalars: true
+  log_histograms: true
+  log_images: true
+  log_graph: true
+
+# Metrics Logging
+metrics_logging:
+  log_every_n_epochs: 1
+  log_to_file: true
+  log_to_tensorboard: true
+  log_to_wandb: false  # Weights & Biases integration
+  
+  # Metrics to track
+  train_metrics:
+    - loss
+    - rmse
+    - mae
+    - learning_rate
+  
+  validation_metrics:
+    - loss
+    - rmse
+    - mae
+    - r2
+  
+  # Additional metrics for specific models
+  physics_metrics:
+    - data_loss
+    - physics_loss
+    - total_loss
+    - gradient_norm
+
+# Performance Profiling
+profiling:
+  enabled: false
+  profile_training: true
+  profile_inference: true
+  save_traces: true
+  trace_dir: logs/profiling
+
+# Debug Settings
+debug:
+  save_gradients: false
+  save_activations: false
+  check_nan: true
+  detect_anomaly: false  # PyTorch anomaly detection
+  log_memory_usage: true
+  log_gpu_usage: true

@@ -1,0 +1,117 @@
+# configs/physics_configs.yaml
+# Physics equations configuration for PINN model
+# Define physics constraints and their weights
+
+physics_equations:
+  # Monotonicity Constraints
+  mass_flux_monotonicity:
+    description: "CHF should increase with mass flux"
+    type: "gradient_constraint"
+    equation: "dCHF_dG > 0"
+    variables:
+      - "mass_flux"
+      - "chf_pred"
+    weight: 0.3
+    active: true
+    
+  pressure_monotonicity:
+    description: "CHF should increase with pressure"
+    type: "gradient_constraint"
+    equation: "dCHF_dP > 0"
+    variables:
+      - "pressure"
+      - "chf_pred"
+    weight: 0.2
+    active: true
+
+  # Physical Bounds
+  positive_chf:
+    description: "CHF must be positive"
+    type: "bound_constraint"
+    equation: "CHF > 0"
+    variables:
+      - "chf_pred"
+    weight: 0.5
+    active: true
+    min_value: 0.0
+    
+  # Correlation Constraints
+  quality_consistency:
+    description: "Higher exit quality should relate to higher CHF"
+    type: "gradient_constraint"
+    equation: "dCHF_dx > 0"
+    variables:
+      - "x_exit"
+      - "chf_pred"
+    weight: 0.1
+    active: true
+
+  # Heat Transfer Relations
+  zuber_correlation:
+    description: "Approximate Zuber correlation for pool boiling"
+    type: "relation_constraint"
+    equation: "CHF = K * (rho_v^0.5) * h_fg * ((sigma * g * (rho_l - rho_v)) / rho_v^2)^0.25"
+    variables:
+      - "pressure"
+      - "chf_pred"
+    parameters:
+      K: 0.131  # Zuber constant
+    weight: 0.15
+    active: false  # Can be enabled for specific applications
+
+  # Kutateladze Constraint
+  kutateladze_number:
+    description: "Kutateladze number constraint"
+    type: "relation_constraint"
+    equation: "K = CHF / (h_fg * sqrt(g * sigma * (rho_l - rho_v)) * rho_v^0.5)"
+    variables:
+      - "chf_pred"
+      - "pressure"
+      - "mass_flux"
+    bounds:
+      min: 0.12
+      max: 0.18
+    weight: 0.1
+    active: false
+
+# Physics Loss Aggregation
+aggregation:
+  method: "weighted_sum"  # Options: weighted_sum, adaptive, learned
+  normalize: true  # Normalize each physics loss
+  temperature: 1.0  # For softmax weighting if adaptive
+
+# Adaptive Weighting Configuration
+adaptive_weighting:
+  enabled: true
+  method: "grad_norm"  # Options: grad_norm, loss_ratio, uncertainty
+  update_frequency: 10  # Update weights every N epochs
+  momentum: 0.9  # Exponential moving average momentum
+  bounds:
+    min_weight: 0.01
+    max_weight: 1.0
+
+# Variable Mapping
+# Maps dataset columns to physics variable names
+variable_mapping:
+  pressure: "pressure_MPa"
+  mass_flux: "mass_flux_kg_m2_s"
+  x_exit: "x_e_out__"
+  diameter_heated: "D_h_mm"
+  diameter_equivalent: "D_e_mm"
+  length: "length_mm"
+  chf_pred: "model_output"
+
+# Physical Constants (SI units)
+physical_constants:
+  g: 9.81  # Gravitational acceleration [m/s^2]
+  sigma_water_100C: 0.0589  # Surface tension [N/m]
+  rho_water_liquid_100C: 958.4  # Density [kg/m^3]
+  rho_water_vapor_100C: 0.598  # Density [kg/m^3]
+  h_fg_water_100C: 2257000  # Latent heat [J/kg]
+
+# Debugging Options
+debug:
+  log_physics_losses: true
+  log_gradients: true
+  plot_constraints: true
+  save_frequency: 10  # Save debug info every N epochs

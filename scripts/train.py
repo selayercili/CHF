@@ -1,380 +1,410 @@
 #!/usr/bin/env python3
+# scripts/train.py
 """
-1) Import in train and test data
-2) Loop through the models
-3) Train the models
-4) Save the model weights in a standard location ./weights/{model_name}/{epoch}.pth
-
-from model_1 import model_1
-from model_2 import model_2
-
-model_names = [model_1, model_2]
-config_args = yaml.safe_load(configs/model_config.yaml)
-
-for model_name in model_names:
-    model = model_1(train, test, config_args[model_name])
-    model.load_weights(f"./weights/{model_name}/{epoch}.pth")
-    model.test()
-
 Model Training Pipeline Script
 
 This script handles the training of multiple models with configurable parameters.
 It loads data, trains models, saves checkpoints, and logs progress.
 
 Usage:
-    python scripts/train_models.py [--config CONFIG_PATH] [--debug]
+    python scripts/train.py [--config CONFIG_PATH] [--models MODEL_NAMES] [--debug]
 """
-
-
-import warnings
-
-# Gets rid of noisy warnings from sklearn to keep output clean
-warnings.filterwarnings("ignore", category=FutureWarning, 
-                        message="'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.")
 
 import os
 import sys
 import argparse
 import logging
-import importlib
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Any, Tuple
-import yaml
-import pandas as pd
-import torch # type: ignore
-from tqdm import tqdm
+from typing import Dict, List, Any, Optional
+import warnings
 
 # Add project root to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+project_root = Path(__file__).parent.parent
+sys.path.append(str(project_root))
+
+# Imports after path setup
+from src.utils import (
+    setup_logging, get_logger, load_config, merge_configs,
+    CheckpointManager, MetricsTracker, EarlyStopping,
+    set_random_seeds, get_device, ConfigManager
+)
+from src.models import model_registry
+from src.data import load_data_with_validation
+
+# Suppress warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 
 class ModelTrainer:
-    """Handles model training pipeline for multiple models."""
+    """Orchestrates model training pipeline for multiple models."""
     
-    def __init__(self, config_path: str = "configs/model_configs.yaml"):
+    def __init__(self, config_path: Optional[Path] = None, debug: bool = False):
         """
         Initialize the ModelTrainer.
         
         Args:
-            config_path: Path to the model configuration YAML file
+            config_path: Path to configuration file
+            debug: Enable debug logging
         """
-        self.config_path = Path(config_path)
-        self.config = self._load_config()
-        self.logger = self._setup_logging()
-        self.weights_dir = Path("./weights")
-        self.data_dir = Path("data/processed")
+        # Setup logging first
+        log_level = 'DEBUG' if debug else 'INFO'
+        setup_logging(log_level=log_level)
+        self.logger = get_logger(__name__)
         
-    def _load_config(self) -> Dict[str, Any]:
-        """Load configuration from YAML file."""
-        if not self.config_path.exists():
-            raise FileNotFoundError(f"Config file not found: {self.config_path}")
-            
-        with open(self.config_path, 'r') as f:
-            config = yaml.safe_load(f)
+        # Load configurations
+        self.config_manager = ConfigManager(config_path or Path("configs"))
+        self.model_config = self.config_manager.get('model_configs')
+        self.global_config = self.model_config.get('global_settings', {})
         
-        return config
+        # Set random seeds
+        set_random_seeds(self.global_config.get('random_seed', 42))
+        
+        # Setup device
+        self.device = get_device()
+        
+        # Setup directories
+        self.setup_directories()
+        
+        self.logger.info("="*60)
+        self.logger.info("Model Trainer Initialized")
+        self.logger.info(f"Config path: {config_path}")
+        self.logger.info(f"Debug mode: {debug}")
+        self.logger.info("="*60)
     
+    def setup_directories(self) -> None:
+        """Create necessary directories."""
+        self.dirs = {
+            'weights': Path("weights"),
+            'logs': Path("logs"),
+            'results': Path("results"),
+            'data': Path("data/processed")
+        }
+        
+        for dir_name, dir_path in self.dirs.items():
+            dir_path.mkdir(parents=True, exist_ok=True)
+            self.logger.debug(f"Directory ready: {dir_path}")
     
-    def _setup_logging(self) -> logging.Logger:
-        """Setup logging configuration."""
-        # Create logs directory if it doesn't exist
-        log_dir = Path("logs")
-        log_dir.mkdir(exist_ok=True)
+    def load_data(self) -> Dict[str, Any]:
+        """Load and prepare training data."""
+        self.logger.info("Loading training data...")
         
-        # Setup logger
-        logger = logging.getLogger("ModelTrainer")
-        logger.setLevel(logging.INFO)
-        
-        # Console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        
-        # File handler
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        file_handler = logging.FileHandler(log_dir / f"training_{timestamp}.log")
-        file_handler.setLevel(logging.DEBUG)
-        
-        # Formatter
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        console_handler.setFormatter(formatter)
-        file_handler.setFormatter(formatter)
-        
-        logger.addHandler(console_handler)
-        logger.addHandler(file_handler)
-        
-        return logger
-    
-    def load_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Load training and test data.
-        
-        Returns:
-            Tuple of (train_df, test_df)
-        """
-        self.logger.info("Loading data...")
-        
-        train_path = self.data_dir / "train.csv"
-        test_path = self.data_dir / "test.csv"
+        train_path = self.dirs['data'] / "train.csv"
+        test_path = self.dirs['data'] / "test.csv"
         
         if not train_path.exists():
             raise FileNotFoundError(f"Training data not found: {train_path}")
         
-        train_df = pd.read_csv(train_path)
-        self.logger.info(f"Loaded training data: {train_df.shape}")
+        # Load data with validation split
+        data_dict = load_data_with_validation(
+            train_path=train_path,
+            test_path=test_path if test_path.exists() else None,
+            validation_split=0.2,
+            random_state=self.global_config.get('random_seed', 42)
+        )
         
-        # Load test data if it exists
-        test_df = None
-        if test_path.exists():
-            test_df = pd.read_csv(test_path)
-            self.logger.info(f"Loaded test data: {test_df.shape}")
-        else:
-            self.logger.warning("Test data not found. Proceeding without test set.")
+        # Log data statistics
+        for split_name, df in data_dict.items():
+            self.logger.info(f"{split_name.capitalize()} data shape: {df.shape}")
         
-        return train_df, test_df
+        return data_dict
     
-    def _get_model_class(self, model_name: str):
+    def get_model_instance(self, model_name: str, config: Dict[str, Any]) -> Any:
         """
-        Dynamically import and return model class.
+        Get model instance from registry.
         
         Args:
-            model_name: Name of the model to import
+            model_name: Name of the model
+            config: Model configuration
             
         Returns:
-            Model class
+            Model instance
         """
-        try:
-            # Convert model name to module path (e.g., "xgboost" -> "src.models.xgboost")
-            module_path = f"src.models.{model_name}"
-            module = importlib.import_module(module_path)
-            
-            # Get the model class (assuming it has the same name as the module)
-            # You might need to adjust this based on your naming convention
-            model_class_name = ''.join(word.capitalize() for word in model_name.split('_'))
-            model_class = getattr(module, model_class_name)
-            
-            return model_class
-        except (ImportError, AttributeError) as e:
-            self.logger.error(f"Failed to import model {model_name}: {e}")
-            raise
+        if model_name not in model_registry:
+            raise ValueError(f"Unknown model: {model_name}")
+        
+        model_class = model_registry[model_name]
+        init_params = config.get('init_params', {})
+        
+        # Special handling for neural networks
+        if model_name in ['neural_network', 'pinn']:
+            # Architecture configuration
+            if 'architecture' in config:
+                arch_config = config['architecture']
+                if 'hidden_layers' in arch_config:
+                    # Convert layer list to parameters
+                    init_params['hidden_layers'] = arch_config['hidden_layers']
+        
+        # Create model instance
+        model = model_class(**init_params)
+        
+        # Add tuning parameters if available
+        if 'tuning' in config:
+            model.tuning_params = config['tuning']
+        
+        return model
     
-    def _create_checkpoint_dir(self, model_name: str) -> Path:
-        """Create directory for model checkpoints."""
-        checkpoint_dir = self.weights_dir / model_name
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        return checkpoint_dir
-    
-    def train_model(self, model_name: str, train_data: pd.DataFrame, 
-                   test_data: pd.DataFrame = None) -> None:
+    def train_model(self, model_name: str, data_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
         Train a single model.
         
         Args:
             model_name: Name of the model to train
-            train_data: Training dataframe
-            test_data: Test dataframe (optional)
+            data_dict: Dictionary with train/val/test data
+            
+        Returns:
+            Training results dictionary
         """
-        self.logger.info(f"Training {model_name}...")
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info(f"Training {model_name}")
+        self.logger.info(f"{'='*60}")
         
         # Get model configuration
-        if model_name not in self.config:
+        if model_name not in self.model_config:
             self.logger.error(f"No configuration found for {model_name}")
-            return
+            return None
         
-        model_config = self.config[model_name]
+        model_config = self.model_config[model_name]
         
-        # Get model class
+        # Create model instance
         try:
-            model_class = self._get_model_class(model_name)
+            model = self.get_model_instance(model_name, model_config)
+            self.logger.info(f"Model {model_name} initialized successfully")
         except Exception as e:
-            self.logger.error(f"Skipping {model_name} due to import error: {e}")
-            return
+            self.logger.error(f"Failed to initialize {model_name}: {str(e)}")
+            return None
         
-        # Create checkpoint directory
-        checkpoint_dir = self._create_checkpoint_dir(model_name)
+        # Setup training components
+        checkpoint_manager = CheckpointManager(
+            checkpoint_dir=self.dirs['weights'],
+            model_name=model_name,
+            max_checkpoints=5,
+            save_best_only=False
+        )
         
-        # Initialize model
-        try:
-            model = model_class(**model_config.get('init_params', {}))
-            
-            if 'tuning' in model_config:
-                model.tuning_params = model_config['tuning']
-                model.logger = self.logger
-                
-            self.logger.info(f"Initialized {model_name} with config: {model_config}")
-        except Exception as e:
-            self.logger.error(f"Failed to initialize {model_name}: {e}")
-            return
+        metrics_tracker = MetricsTracker(
+            save_dir=self.dirs['logs'] / model_name,
+            window_size=100
+        )
         
         # Training parameters
-        epochs = model_config.get('epochs', 10)
-        batch_size = model_config.get('batch_size', 32)
-        learning_rate = model_config.get('learning_rate', 0.001)
+        training_config = model_config.get('training', {})
+        epochs = training_config.get('epochs', model_config.get('epochs', 10))
+        batch_size = training_config.get('batch_size', 32)
         
-        # Setup optimizer if model uses PyTorch
-        if hasattr(model, 'parameters'):
-            optimizer = torch.optim.Adam(
-                model.parameters(), 
-                lr=learning_rate
-            )
+        # Early stopping
+        early_stopping = EarlyStopping(
+            patience=training_config.get('early_stopping_patience', 10),
+            mode='min',
+            restore_best_weights=True
+        )
+        
+        # Training data
+        train_data = data_dict['train']
+        val_data = data_dict.get('val')
         
         # Training loop
-        best_loss = float('inf')
-        patience = 0  # Initialize patience counter
-        max_patience = 5  # Stop after 5 epochs without improvement
+        best_val_loss = float('inf')
+        training_start_time = datetime.now()
+        
+        self.logger.info(f"Starting training for {epochs} epochs...")
         
         for epoch in range(epochs):
-            self.logger.info(f"Epoch {epoch + 1}/{epochs}")
+            epoch_start_time = datetime.now()
             
+            # Train epoch
             try:
-                # Train for one epoch
+                metrics_tracker.start_timer('train_epoch')
                 train_metrics = model.train_epoch(
-                    train_data, 
-                    batch_size=batch_size,
-                    optimizer=optimizer if hasattr(model, 'parameters') else None
+                    train_data,
+                    batch_size=batch_size
                 )
+                train_time = metrics_tracker.stop_timer('train_epoch')
                 
-                # Validate if test data is available
+                # Update metrics
+                metrics_tracker.update(train_metrics, prefix='train/')
+                
+                # Validation
                 val_metrics = {}
-                if test_data is not None:
-                    val_metrics = model.validate(test_data)
+                if val_data is not None:
+                    metrics_tracker.start_timer('validation')
+                    val_metrics = model.validate(val_data)
+                    val_time = metrics_tracker.stop_timer('validation')
+                    metrics_tracker.update(val_metrics, prefix='val/')
                 
-                # Log metrics
+                # Log epoch results
+                epoch_time = (datetime.now() - epoch_start_time).total_seconds()
                 self.logger.info(
-                    f"Train metrics: {train_metrics} | "
-                    f"Val metrics: {val_metrics}"
+                    f"Epoch {epoch+1}/{epochs} - "
+                    f"Train Loss: {train_metrics.get('loss', 0):.6f} - "
+                    f"Val Loss: {val_metrics.get('loss', 0):.6f} - "
+                    f"Time: {epoch_time:.2f}s"
                 )
                 
                 # Save checkpoint
-                checkpoint_path = checkpoint_dir / f"epoch_{epoch + 1}.pth"
-                self._save_checkpoint(
-                    model, 
-                    checkpoint_path, 
-                    epoch + 1,
-                    train_metrics,
-                    val_metrics
+                current_loss = val_metrics.get('loss', train_metrics.get('loss', 0))
+                is_best = current_loss < best_val_loss
+                
+                if is_best:
+                    best_val_loss = current_loss
+                
+                checkpoint_manager.save_checkpoint(
+                    model=model,
+                    epoch=epoch + 1,
+                    metrics={**train_metrics, **{f'val_{k}': v for k, v in val_metrics.items()}},
+                    is_best=is_best
                 )
                 
-                # Save best model
-                current_loss = val_metrics.get('loss', train_metrics.get('loss', float('inf')))
-                if current_loss < best_loss:
-                    best_loss = current_loss
-                    best_checkpoint_path = checkpoint_dir / "best_model.pth"
-                    self._save_checkpoint(
-                        model,
-                        best_checkpoint_path,
-                        epoch + 1,
-                        train_metrics,
-                        val_metrics,
-                        is_best=True
-                    )
-                    self.logger.info(f"Saved best model with loss: {best_loss:.4f}")
-                    patience = 0
-                else:
-                    patience += 1  # Increment patience 
-                    self.logger.info(f"No improvement. Patience: {patience}/{max_patience}")
-                    
                 # Early stopping check
-                if patience >= max_patience:
-                    self.logger.info(f"Early stopping at epoch {epoch+1}. No improvement for {max_patience} epochs.")
+                if val_data is not None and early_stopping(current_loss, model):
+                    self.logger.info(f"Early stopping at epoch {epoch + 1}")
                     break
-                    
+                
             except Exception as e:
-                self.logger.error(f"Error during epoch {epoch + 1}: {e}")
+                self.logger.error(f"Error during epoch {epoch + 1}: {str(e)}")
+                self.logger.exception("Detailed traceback:")
                 continue
-            
-
         
-        self.logger.info(f"Completed training for {model_name}")
-        self.logger.info(f"🎯 Best loss achieved for {model_name}: {best_loss:.6f}")
-    
-    def _save_checkpoint(self, model, checkpoint_path: Path, epoch: int,
-                        train_metrics: Dict, val_metrics: Dict,
-                        is_best: bool = False) -> None:
-        """Save model checkpoint."""
-        checkpoint = {
-            'epoch': epoch,
-            'train_metrics': train_metrics,
-            'val_metrics': val_metrics,
-            'timestamp': datetime.now().isoformat()
+        # Training completed
+        training_time = (datetime.now() - training_start_time).total_seconds()
+        
+        # Save final metrics
+        metrics_tracker.save()
+        
+        # Get summary
+        summary = metrics_tracker.get_summary()
+        
+        results = {
+            'model_name': model_name,
+            'epochs_trained': epoch + 1,
+            'best_val_loss': best_val_loss,
+            'training_time': training_time,
+            'metrics_summary': summary
         }
         
-        # Handle different model types
-        if hasattr(model, 'state_dict'):
-            # PyTorch model
-            checkpoint['model_state_dict'] = model.state_dict()
-            torch.save(checkpoint, checkpoint_path)
-        elif hasattr(model, 'save'):
-            # Custom save method
-            model.save(checkpoint_path, metadata=checkpoint)
-        else:
-            # Fallback: pickle the entire model
-            import pickle
-            checkpoint['model'] = model
-            with open(checkpoint_path, 'wb') as f:
-                pickle.dump(checkpoint, f)
+        self.logger.info(f"\nTraining completed for {model_name}")
+        self.logger.info(f"Total time: {training_time/60:.2f} minutes")
+        self.logger.info(f"Best validation loss: {best_val_loss:.6f}")
         
-        log_msg = f"Saved checkpoint: {checkpoint_path}"
-        if is_best:
-            log_msg = f"Saved best model: {checkpoint_path}"
-        self.logger.info(log_msg)
+        return results
     
-    def train_all_models(self) -> None:
-        """Train all models specified in the configuration."""
+    def train_all_models(self, model_names: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Train all specified models.
+        
+        Args:
+            model_names: List of model names to train (None for all)
+            
+        Returns:
+            Dictionary of training results
+        """
         # Load data once
-        train_data, test_data = self.load_data()
+        data_dict = self.load_data()
         
         # Get list of models to train
-        model_names = list(self.config.keys())
-        self.logger.info(f"Found {len(model_names)} models to train: {model_names}")
+        if model_names is None:
+            model_names = [name for name in self.model_config.keys() 
+                          if name != 'global_settings']
+        
+        self.logger.info(f"\nWill train {len(model_names)} models: {model_names}")
         
         # Train each model
+        all_results = {}
+        
         for model_name in model_names:
             try:
-                self.train_model(model_name, train_data, test_data)
+                results = self.train_model(model_name, data_dict)
+                if results:
+                    all_results[model_name] = results
+            except KeyboardInterrupt:
+                self.logger.warning("Training interrupted by user")
+                break
             except Exception as e:
-                self.logger.error(f"Failed to train {model_name}: {e}")
+                self.logger.error(f"Failed to train {model_name}: {str(e)}")
+                self.logger.exception("Detailed traceback:")
                 continue
         
-        self.logger.info("Training pipeline completed!")
+        # Summary
+        self.logger.info("\n" + "="*60)
+        self.logger.info("TRAINING SUMMARY")
+        self.logger.info("="*60)
+        
+        for model_name, results in all_results.items():
+            self.logger.info(
+                f"{model_name}: "
+                f"Epochs={results['epochs_trained']}, "
+                f"Best Loss={results['best_val_loss']:.6f}, "
+                f"Time={results['training_time']/60:.1f}min"
+            )
+        
+        return all_results
 
 
 def main():
     """Main entry point for the training script."""
     parser = argparse.ArgumentParser(
-        description="Train multiple models with configuration"
+        description="Train CHF prediction models",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Train all models
+  python scripts/train.py
+  
+  # Train specific models
+  python scripts/train.py --models xgboost lightgbm
+  
+  # Use custom config
+  python scripts/train.py --config configs/custom_config.yaml
+  
+  # Debug mode
+  python scripts/train.py --debug
+        """
     )
+    
     parser.add_argument(
         '--config',
         type=str,
-        default='configs/model_configs.yaml',
-        help='Path to model configuration file'
+        default='configs',
+        help='Path to configuration directory or file'
     )
+    
+    parser.add_argument(
+        '--models',
+        nargs='+',
+        type=str,
+        help='Specific models to train (default: all)'
+    )
+    
     parser.add_argument(
         '--debug',
         action='store_true',
         help='Enable debug logging'
     )
     
+    parser.add_argument(
+        '--resume',
+        type=str,
+        help='Resume training from checkpoint'
+    )
+    
     args = parser.parse_args()
     
     # Initialize trainer
-    trainer = ModelTrainer(config_path=args.config)
+    config_path = Path(args.config)
+    trainer = ModelTrainer(config_path=config_path, debug=args.debug)
     
-    # Set debug logging if requested
-    if args.debug:
-        trainer.logger.setLevel(logging.DEBUG)
-    
-    # Run training pipeline
+    # Run training
     try:
-        trainer.train_all_models()
+        trainer.train_all_models(model_names=args.models)
     except KeyboardInterrupt:
-        trainer.logger.info("Training interrupted by user")
+        trainer.logger.warning("\nTraining interrupted by user")
+        sys.exit(1)
     except Exception as e:
-        trainer.logger.error(f"Training failed: {e}")
-        raise
+        trainer.logger.error(f"Training failed: {str(e)}")
+        if args.debug:
+            trainer.logger.exception("Detailed traceback:")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

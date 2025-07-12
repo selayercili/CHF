@@ -1,57 +1,111 @@
-# Model Configuration File
+# configs/model_configs.yaml
+# Model configuration file for CHF prediction
 # Each top-level key represents a model to train
 
+# XGBoost Configuration
 xgboost:
   init_params:
     objective: "reg:squarederror"
-    # Hyperparameters to tune
-    learning_rate: [0.01, 0.05, 0.1]  # Also called eta
+    # Hyperparameters for tuning (lists indicate tuning ranges)
+    learning_rate: [0.01, 0.05, 0.1]
     max_depth: [3, 5, 7]
     n_estimators: [100, 200, 500]
     subsample: [0.6, 0.8, 1.0]
     colsample_bytree: [0.6, 0.8, 1.0]
     gamma: [0, 0.1, 0.2]
+    random_state: 42
   tuning:
     method: "random"  # Options: grid, random
     n_iter: 20        # For random search
     cv: 5             # Cross-validation folds
     scoring: "neg_mean_squared_error"
-  epochs: 30        # More trees for better convergence
+    verbose: 1
+  training:
+    epochs: 30
+    early_stopping_rounds: 10
+    validation_fraction: 0.2
 
+# LightGBM Configuration
 lightgbm:
   init_params:
     objective: "regression"
     learning_rate: 0.05
-    n_estimators: 1  # Start with 1 estimator
+    n_estimators: 100
     num_leaves: 31
     metric: ["l2", "mae"]
     verbosity: -1
-  epochs: 10
+    random_state: 42
+  tuning:
+    method: "random"
+    n_iter: 15
+    cv: 5
+  training:
+    epochs: 50
+    early_stopping_rounds: 10
 
+# Neural Network Configuration
 neural_network:
+  architecture:
+    hidden_layers: [128, 64, 32]  # List of hidden layer sizes
+    activation: "relu"
+    dropout_rate: 0.2
+    batch_normalization: true
   init_params:
-    hidden_size: 64
     learning_rate: 0.001
-  epochs: 10
-  batch_size: 32
+    optimizer: "adam"
+    loss_function: "mse"
+  training:
+    epochs: 100
+    batch_size: 32
+    validation_split: 0.2
+    early_stopping_patience: 15
+    reduce_lr_patience: 10
+    reduce_lr_factor: 0.5
 
+# Support Vector Machine Configuration
 svm:
   init_params:
-    kernel: 'rbf'       # rbf, linear, poly, sigmoid
+    kernel: 'rbf'       # Options: rbf, linear, poly, sigmoid
     C: 1.0              # Regularization parameter
     epsilon: 0.1        # Epsilon-tube for SVR
     gamma: 'scale'      # Kernel coefficient
-  epochs: 1             # SVM trains fully in one epoch
+    cache_size: 1000    # MB
+  tuning:
+    method: "grid"
+    param_grid:
+      C: [0.1, 1.0, 10.0]
+      epsilon: [0.01, 0.1, 0.5]
+      gamma: ['scale', 'auto', 0.001, 0.01]
+    cv: 3  # Fewer folds for SVM due to computational cost
+  training:
+    epochs: 1  # SVM trains fully in one epoch
 
-# Add this to your configs/model_configs.yaml file
-
+# Physics-Informed Neural Network Configuration
 pinn:
+  architecture:
+    hidden_layers: [128, 128, 64]
+    activation: "tanh"  # Better for physics problems
+    initializer: "xavier"
   init_params:
-    hidden_size: 128           # Increased for more capacity
-    learning_rate: 0.0005      # Reduced learning rate
-    lambda_physics: 0.01       # Much smaller physics weight
-    debug: true                # Enable debugging
-    physics_warmup_epochs: 10  # Gradual physics introduction
-  epochs: 100                  # More epochs with patience
-  batch_size: 64              # Larger batch size for stability
-  learning_rate: 0.0005       # Consistent with init_params
+    learning_rate: 0.0005
+    optimizer: "adam"
+    lambda_physics: 0.01  # Physics loss weight
+  physics:
+    equations_config: "physics_configs.yaml"  # Reference to physics config
+    warmup_epochs: 10  # Gradually introduce physics
+    adaptive_weighting: true
+  training:
+    epochs: 200
+    batch_size: 64
+    validation_split: 0.2
+    checkpoint_frequency: 10  # Save every N epochs
+    debug: true  # Enable physics loss debugging
+
+# Global training settings
+global_settings:
+  random_seed: 42
+  num_workers: 4  # For data loading
+  pin_memory: true  # For GPU
+  mixed_precision: false  # For faster training
+  gradient_clipping: 1.0  # Max gradient norm
+  tensorboard: true  # Enable tensorboard logging
