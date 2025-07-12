@@ -2,7 +2,7 @@
 """Shared utilities package for the CHF project."""
 
 from .logging import setup_logging, get_logger
-from .config import load_config, merge_configs, validate_config
+from .config import load_config, merge_configs, validate_config, ConfigManager
 from .checkpoint import CheckpointManager
 from .metrics import MetricsTracker
 from .early_stopping import EarlyStopping
@@ -14,6 +14,7 @@ __all__ = [
     'load_config',
     'merge_configs',
     'validate_config',
+    'ConfigManager',
     'CheckpointManager',
     'MetricsTracker',
     'EarlyStopping',
