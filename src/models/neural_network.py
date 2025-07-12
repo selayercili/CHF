@@ -191,20 +191,15 @@ class NeuralNetwork:
         else:
             X = data.values
         
-        X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
-        
-        X = self.input_scaler.transform(X)  # Scale input
+        # Scale input
+        X = self.input_scaler.transform(X)
         X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
         
         self.model.eval()
         with torch.no_grad():
             predictions_scaled = self.model(X_tensor).cpu().numpy()
         
-        self.model.eval()
-        with torch.no_grad():
-            predictions = self.model(X_tensor).cpu().numpy()
-        
-        # Inverse scale predictions:
+        # Inverse scale predictions
         return self.target_scaler.inverse_transform(predictions_scaled).flatten()
     
     def save(self, path: Path, metadata: Dict[str, Any] = None):
@@ -227,13 +222,22 @@ class NeuralNetwork:
             'input_size': self.input_size,
             'hidden_size': self.hidden_size,
             'output_size': self.output_size,
-            'learning_rate': self.learning_rate
+            'learning_rate': self.learning_rate,
+            # CRITICAL: Save the fitted scalers!
+            'input_scaler': pickle.dumps(self.input_scaler),
+            'target_scaler': pickle.dumps(self.target_scaler)
         }
         
         if metadata:
             save_dict['metadata'] = metadata
         
+        # Ensure path has .pth extension
+        path = Path(path)
+        if not path.suffix:
+            path = path.with_suffix('.pth')
+            
         torch.save(save_dict, path)
+        print(f"✓ Saved model to {path}")
     
     def load(self, path: Path):
         """
@@ -242,6 +246,10 @@ class NeuralNetwork:
         Args:
             path: Path to load the model from
         """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Model file not found: {path}")
+            
         checkpoint = torch.load(path, map_location=self.device)
         
         # Rebuild model architecture
@@ -260,7 +268,34 @@ class NeuralNetwork:
         self.epoch = checkpoint['epoch']
         self.is_fitted = checkpoint['is_fitted']
         
+        # CRITICAL: Load the fitted scalers!
+        if 'input_scaler' in checkpoint:
+            self.input_scaler = pickle.loads(checkpoint['input_scaler'])
+        if 'target_scaler' in checkpoint:
+            self.target_scaler = pickle.loads(checkpoint['target_scaler'])
+        
+        print(f"✓ Loaded model from {path} (epoch {self.epoch})")
+        
         return checkpoint.get('metadata', {})
+    
+    @classmethod
+    def load_from_checkpoint(cls, path: Path):
+        """
+        Alternative class method to load a model from checkpoint.
+        
+        Args:
+            path: Path to the checkpoint file
+            
+        Returns:
+            Loaded NeuralNetwork instance
+        """
+        # Create a new instance
+        instance = cls()
+        
+        # Load the checkpoint
+        instance.load(path)
+        
+        return instance
     
     def get_feature_importance(self) -> pd.DataFrame:
         """
