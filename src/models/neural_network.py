@@ -250,7 +250,8 @@ class NeuralNetwork:
         if not path.exists():
             raise FileNotFoundError(f"Model file not found: {path}")
             
-        checkpoint = torch.load(path, map_location=self.device)
+        # Use weights_only=False to allow loading pickled objects (StandardScaler)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
         # Rebuild model architecture
         self.input_size = checkpoint['input_size']
