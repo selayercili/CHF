@@ -11,6 +11,8 @@ from typing import Dict, Any, Optional, Tuple
 import pickle
 from pathlib import Path
 from sklearn.model_selection import RandomizedSearchCV, GridSearchCV 
+import json
+import tempfile
 
 class Xgboost:
     """XGBoost model wrapper for the training pipeline."""
@@ -24,7 +26,7 @@ class Xgboost:
         """
         self.logger = kwargs.pop('logger', None)  # Extract logger to avoid serialization issues
         self.tuning_params = kwargs.pop('tuning', {})  # Extract tuning config
-        self.params = kwargs  # Store params for serialization
+        self.params = kwargs.copy()  # Store params for serialization
         
         # Determine if it's a classification or regression task
         objective = kwargs.get('objective', 'reg:squarederror')
@@ -68,8 +70,8 @@ class Xgboost:
                 param_grid=param_grid,
                 cv=self.tuning_params.get('cv', 5),
                 scoring=self.tuning_params.get('scoring', 'neg_mean_squared_error'),
-                verbose=1  # Reduced from 2 to 1
-        )
+                verbose=1
+            )
         else:
             search = RandomizedSearchCV(
                 estimator=self.model,
@@ -93,7 +95,6 @@ class Xgboost:
         self.model = search.best_estimator_
         self.params.update(best_params)
         return best_params
-    
     
     def train_epoch(self, train_data: pd.DataFrame, 
                    batch_size: int = None,
@@ -192,34 +193,40 @@ class Xgboost:
     
     def save(self, path: Path, metadata: Dict[str, Any] = None):
         """
-        Save model to disk using XGBoost's native format.
+        Save model to disk in a checkpoint-compatible format.
         
         Args:
-            path: Path to save the model
+            path: Path to save the model (will save as single file)
             metadata: Additional metadata to save with the model
         """
         # Ensure path is a Path object
         path = Path(path)
         
-        # Save the XGBoost model using native format
-        model_path = path.with_suffix('.json')
-        self.model.save_model(str(model_path))
+        # Create a temporary directory to store XGBoost model
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Save XGBoost model to temporary JSON file
+            temp_model_path = Path(temp_dir) / "xgboost_model.json"
+            self.model.save_model(str(temp_model_path))
+            
+            # Read the model JSON
+            with open(temp_model_path, 'r') as f:
+                model_json = f.read()
         
-        # Save other attributes
+        # Create save dictionary with everything
         save_dict = {
-            'model_path': str(model_path.name),  # Store relative path
+            'model_json': model_json,  # Store model as JSON string
             'task_type': self.task_type,
             'is_fitted': self.is_fitted,
             'params': self.params,
-            'tuning_params': self.tuning_params
+            'tuning_params': self.tuning_params,
+            'n_features': self.model.n_features_in_ if hasattr(self.model, 'n_features_in_') else None
         }
         
         if metadata:
             save_dict['metadata'] = metadata
         
-        # Save metadata separately
-        metadata_path = path.with_suffix('.pkl')
-        with open(metadata_path, 'wb') as f:
+        # Save everything to a single pickle file
+        with open(path, 'wb') as f:
             pickle.dump(save_dict, f)
     
     def load(self, path: Path):
@@ -232,9 +239,8 @@ class Xgboost:
         # Ensure path is a Path object
         path = Path(path)
         
-        # Load metadata
-        metadata_path = path.with_suffix('.pkl')
-        with open(metadata_path, 'rb') as f:
+        # Load the save dictionary
+        with open(path, 'rb') as f:
             save_dict = pickle.load(f)
         
         # Restore attributes
@@ -243,16 +249,25 @@ class Xgboost:
         self.tuning_params = save_dict.get('tuning_params', {})
         self.is_fitted = save_dict['is_fitted']
         
-        # Recreate the model with original parameters
+        # Recreate the model
         if self.task_type == 'classification':
             self.model = xgb.XGBClassifier(**self.params)
         else:
             self.model = xgb.XGBRegressor(**self.params)
         
-        # Load the trained model
-        model_filename = save_dict['model_path']
-        model_path = path.parent / model_filename
-        self.model.load_model(str(model_path))
+        # Load the model from JSON string
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Write JSON to temporary file
+            temp_model_path = Path(temp_dir) / "xgboost_model.json"
+            with open(temp_model_path, 'w') as f:
+                f.write(save_dict['model_json'])
+            
+            # Load model from temporary file
+            self.model.load_model(str(temp_model_path))
+        
+        # Set n_features_in_ if it was saved
+        if 'n_features' in save_dict and save_dict['n_features'] is not None:
+            self.model.n_features_in_ = save_dict['n_features']
         
         return save_dict.get('metadata', {})
     
