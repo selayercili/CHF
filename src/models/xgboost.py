@@ -22,9 +22,9 @@ class Xgboost:
         Args:
             **kwargs: Parameters passed to xgb.XGBRegressor/XGBClassifier
         """
-        self.logger = kwargs.pop('logger', None)  # <-- Add this
-        self.params = kwargs
+        self.logger = kwargs.pop('logger', None)  # Extract logger to avoid serialization issues
         self.tuning_params = kwargs.pop('tuning', {})  # Extract tuning config
+        self.params = kwargs  # Store params for serialization
         
         # Determine if it's a classification or regression task
         objective = kwargs.get('objective', 'reg:squarederror')
@@ -192,22 +192,34 @@ class Xgboost:
     
     def save(self, path: Path, metadata: Dict[str, Any] = None):
         """
-        Save model to disk.
+        Save model to disk using XGBoost's native format.
         
         Args:
             path: Path to save the model
             metadata: Additional metadata to save with the model
         """
+        # Ensure path is a Path object
+        path = Path(path)
+        
+        # Save the XGBoost model using native format
+        model_path = path.with_suffix('.json')
+        self.model.save_model(str(model_path))
+        
+        # Save other attributes
         save_dict = {
-            'model': self.model,
+            'model_path': str(model_path.name),  # Store relative path
             'task_type': self.task_type,
-            'is_fitted': self.is_fitted
+            'is_fitted': self.is_fitted,
+            'params': self.params,
+            'tuning_params': self.tuning_params
         }
         
         if metadata:
             save_dict['metadata'] = metadata
         
-        with open(path, 'wb') as f:
+        # Save metadata separately
+        metadata_path = path.with_suffix('.pkl')
+        with open(metadata_path, 'wb') as f:
             pickle.dump(save_dict, f)
     
     def load(self, path: Path):
@@ -217,12 +229,30 @@ class Xgboost:
         Args:
             path: Path to load the model from
         """
-        with open(path, 'rb') as f:
+        # Ensure path is a Path object
+        path = Path(path)
+        
+        # Load metadata
+        metadata_path = path.with_suffix('.pkl')
+        with open(metadata_path, 'rb') as f:
             save_dict = pickle.load(f)
         
-        self.model = save_dict['model']
+        # Restore attributes
         self.task_type = save_dict['task_type']
+        self.params = save_dict.get('params', {})
+        self.tuning_params = save_dict.get('tuning_params', {})
         self.is_fitted = save_dict['is_fitted']
+        
+        # Recreate the model with original parameters
+        if self.task_type == 'classification':
+            self.model = xgb.XGBClassifier(**self.params)
+        else:
+            self.model = xgb.XGBRegressor(**self.params)
+        
+        # Load the trained model
+        model_filename = save_dict['model_path']
+        model_path = path.parent / model_filename
+        self.model.load_model(str(model_path))
         
         return save_dict.get('metadata', {})
     
