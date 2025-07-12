@@ -12,10 +12,10 @@ xgboost>=1.7.0,<2.0.0
 lightgbm>=4.0.0,<5.0.0
 
 # Deep Learning
-# torch>=2.0.0,<3.0.0
+torch>=2.0.0,<3.0.0
 
-# Note: For GPU support, install torch with CUDA support:
-pip install torch --index-url https://download.pytorch.org/whl/cu118
+# # Note: For GPU support, install torch with CUDA support:
+# pip install torch --index-url https://download.pytorch.org/whl/cu118
 
 # Visualization
 matplotlib>=3.7.0,<4.0.0
