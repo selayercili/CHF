@@ -33,7 +33,7 @@ from src.utils import (
     CheckpointManager, MetricsTracker, ConfigManager
 )
 from src.models import model_registry
-from src.evaluation.metrics import calculate_metrics
+from src.utils.metrics import calculate_metrics
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
