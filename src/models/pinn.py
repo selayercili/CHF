@@ -57,23 +57,23 @@ class Pinn:
         eps = 1e-8  # Small epsilon to avoid log(0)
         
         # Convert pressure (MPa → Pa) and ensure positive
-        pressure_Pa = (torch.abs(inputs[:, 0]) + eps) * 1e6  
+        pressure_Pa = (torch.abs(inputs[:, 1]) + eps) * 1e6  
         
         # Convert diameters/length (mm → m)
-        D_h_m = (torch.abs(inputs[:, 4]) + eps) * 1e-3  
-        length_m = (torch.abs(inputs[:, 5]) + eps) * 1e-3  
+        D_h_m = (torch.abs(inputs[:, 5]) + eps) * 1e-3  
+        length_m = (torch.abs(inputs[:, 6]) + eps) * 1e-3  
         
         # Convert CHF (MW/m² → W/m²) if provided
         chf_Wm2 = chf_exp * 1e6 if chf_exp is not None else None
         
         return {
             'pressure_Pa': pressure_Pa,
-            'mass_flux': torch.abs(inputs[:, 1]) + eps,
-            'x_e_out': inputs[:, 2],  # Can be negative
+            'mass_flux': torch.abs(inputs[:, 2]) + eps,
+            'x_e_out': inputs[:, 3],  # Can be negative
             'D_h_m': D_h_m,
             'length_m': length_m,
-            'geom_tube': inputs[:, 6] if inputs.shape[1] > 6 else torch.zeros_like(pressure_Pa),
-            'geom_annulus': inputs[:, 7] if inputs.shape[1] > 7 else torch.zeros_like(pressure_Pa),
+            'geom_tube': inputs[:, 7] if inputs.shape[1] > 6 else torch.zeros_like(pressure_Pa),
+            'geom_annulus': inputs[:, 8] if inputs.shape[1] > 7 else torch.zeros_like(pressure_Pa),
             'chf_Wm2': chf_Wm2  # Only included if chf_exp was passed
         }
         
@@ -146,17 +146,19 @@ class Pinn:
         """Physics loss using ONLY the Bowring correlation."""
         # Step 1: Convert inputs to SI units
         eps = 1e-8  # Small epsilon to avoid division/log(0)
-        pressure_Pa = (torch.abs(inputs[:, 0]) + eps) * 1e6      # MPa → Pa
-        mass_flux = torch.abs(inputs[:, 1]) + eps                 # kg/m²·s
-        x_e_out = inputs[:, 2]                                    # Can be negative
-        length_m = (torch.abs(inputs[:, 5]) + eps) * 1e-3          # mm → m
+        pressure_Pa = (torch.abs(inputs[:, 1]) + eps) * 1e6      # MPa → Pa
+        mass_flux = torch.abs(inputs[:, 2]) + eps                 # kg/m²·s
+        x_e_out = inputs[:, 3]                                    # Can be negative
+        length_m = (torch.abs(inputs[:, 6]) + eps) * 1e-3          # mm → m
+        chf_Wm2 = (torch.abs(inputs[:, 8]) + eps) * 1e6           #MW/m2 → W/m2
+        D_h_m = D_h_m = (torch.abs(inputs[:, 5]) + eps) * 1e-3
 
         # Step 2: Compute Δh_sub,in (simplified: Δh_sub,in ≈ h_fg * (1 - x_e_out))
         h_fg = torch.stack([
             torch.tensor(CP.PropsSI('Hvap', 'P', p.item(), 'Q', 1, 'Water'), 
             device=self.device
         ) for p in pressure_Pa])
-        Δh_sub_in = h_fg * (1 - x_e_out)  # [J/kg]
+        Δh_sub_in = (-x_e_out * h_fg) + (4 * chf_Wm2 * length_m)/(mass_flux * D_h_m)
 
         # Step 3: Bowring equation (all terms in SI units)
         A = self.bowring_params['A']
