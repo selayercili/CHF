@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional, Tuple  # <-- Added Tuple import
 from pathlib import Path
 import pickle
 from sklearn.preprocessing import StandardScaler
+import CoolProp.CoolProp as CP 
 
 class Pinn:
     """PINN model wrapper with physics constraints for heat flux prediction."""
@@ -40,16 +41,79 @@ class Pinn:
         self.physics_warmup_epochs = kwargs.get('physics_warmup_epochs', 10)  # Gradually introduce physics
         
         # CHF Equation Parameters (learnable)
-        self.chf_params = {
-            'ln_A': nn.Parameter(torch.tensor(0.0)),  # ln(A) coefficient
-            'B': nn.Parameter(torch.tensor(1.0)),     # Quality interaction coefficient
-            'n1': nn.Parameter(torch.tensor(0.8)),    # mass_flux exponent
-            'n2': nn.Parameter(torch.tensor(0.3)),    # pressure exponent  
-            'n3': nn.Parameter(torch.tensor(0.5)),    # quality term exponent
-            'n4': nn.Parameter(torch.tensor(-0.2)),   # length exponent (negative expected)
-            'n5': nn.Parameter(torch.tensor(0.0)),    # tube geometry coefficient
-            'n6': nn.Parameter(torch.tensor(0.0))     # annulus geometry coefficient
+        self.bowring_params = {
+        'A': nn.Parameter(torch.tensor(0.5)),   # Base coefficient
+        'B': nn.Parameter(torch.tensor(1e-4)),  # Subcooling coefficient
+        'C': nn.Parameter(torch.tensor(0.1)),   # Quality offset
+        'D': nn.Parameter(torch.tensor(1.0))    # Quality coefficient
         }
+        
+        # Register parameters
+        for name, param in self.bowring_params.items():
+            self.register_parameter(f'bowring_{name}', param)
+
+    def _convert_units(self, inputs: torch.Tensor, chf_exp: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """Convert inputs to SI units and scale CHF from MW/m² to W/m²."""
+        eps = 1e-8  # Small epsilon to avoid log(0)
+        
+        # Convert pressure (MPa → Pa) and ensure positive
+        pressure_Pa = (torch.abs(inputs[:, 0]) + eps) * 1e6  
+        
+        # Convert diameters/length (mm → m)
+        D_h_m = (torch.abs(inputs[:, 4]) + eps) * 1e-3  
+        length_m = (torch.abs(inputs[:, 5]) + eps) * 1e-3  
+        
+        # Convert CHF (MW/m² → W/m²) if provided
+        chf_Wm2 = chf_exp * 1e6 if chf_exp is not None else None
+        
+        return {
+            'pressure_Pa': pressure_Pa,
+            'mass_flux': torch.abs(inputs[:, 1]) + eps,
+            'x_e_out': inputs[:, 2],  # Can be negative
+            'D_h_m': D_h_m,
+            'length_m': length_m,
+            'geom_tube': inputs[:, 6] if inputs.shape[1] > 6 else torch.zeros_like(pressure_Pa),
+            'geom_annulus': inputs[:, 7] if inputs.shape[1] > 7 else torch.zeros_like(pressure_Pa),
+            'chf_Wm2': chf_Wm2  # Only included if chf_exp was passed
+        }
+        
+    def _compute_subcooling(self, vars_si: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Compute inlet subcooling Δh_sub,in [J/kg] using CoolProp and flow parameters.
+        
+        Args:
+            vars_si: Dictionary containing SI-unit-converted variables:
+                - pressure_Pa (torch.Tensor): Pressure in Pascals.
+                - mass_flux (torch.Tensor): Mass flux in kg/m²·s.
+                - x_e_out (torch.Tensor): Equilibrium quality at outlet.
+                - D_h_m (torch.Tensor): Hydraulic diameter in meters.
+                - length_m (torch.Tensor): Heated length in meters.
+                - chf_Wm2 (torch.Tensor, optional): Critical heat flux in W/m².
+        
+        Returns:
+            torch.Tensor: Δh_sub,in [J/kg].
+        """
+        pressure_Pa = vars_si['pressure_Pa']
+        x_e_out = vars_si['x_e_out']
+        mass_flux = vars_si['mass_flux']
+        length_m = vars_si['length_m']
+        D_h_m = vars_si['D_h_m']
+        chf_Wm2 = vars_si.get('chf_Wm2', None)  # Optional if CHF is needed
+
+        # Get fluid properties using CoolProp
+        h_f = torch.stack([
+            torch.tensor(CP.PropsSI('H', 'P', p.item(), 'Q', 0, 'Water'), device=self.device)
+            for p in pressure_Pa
+        ])  # Saturated liquid enthalpy [J/kg]
+        
+        h_fg = torch.stack([
+            torch.tensor(CP.PropsSI('Hvap', 'P', p.item(), 'Q', 1, 'Water'), device=self.device)
+            for p in pressure_Pa
+        ])  # Latent heat [J/kg]
+
+        Δh_sub_in = (-x_e_out * h_fg) + (4 * chf_Wm2 * length_m)/(mass_flux * D_h_m) #formula I have derived for tubes but shoul work for other geometries in theory
+
+        return Δh_sub_in
 
     def _build_model(self, input_size: int) -> nn.Module:
         """Enhanced 4-layer MLP with better initialization and dropout."""
@@ -79,96 +143,52 @@ class Pinn:
         return model
 
     def _physics_loss(self, inputs: torch.Tensor, predictions: torch.Tensor) -> torch.Tensor:
-        """
-        CHF Physics-Informed Loss using the derived equation:
-        ln(chf_exp) = ln(A) + n1*ln(mass_flux) + n2*ln(pressure) + n3*ln(1 + B*x_e_out) + n4*ln(length) + n5*geom_tube + n6*geom_annulus
-        """
-        # Extract physical parameters (adjust indices based on your column order)
-        # Assuming column order: pressure, mass_flux, x_e_out, D_e, D_h, length, geom_tube, geom_annulus
-        eps = 1e-8  # Small epsilon to prevent log(0)
-        
-        # Extract variables (assuming scaled inputs)
-        pressure = torch.abs(inputs[:, 0]) + eps      # Ensure positive
-        mass_flux = torch.abs(inputs[:, 1]) + eps     # Ensure positive  
-        x_e_out = inputs[:, 2]                        # Can be negative
-        length = torch.abs(inputs[:, 5]) + eps        # Ensure positive
-        
-        # Geometry variables (assuming one-hot encoded)
-        geom_tube = inputs[:, 6] if inputs.shape[1] > 6 else torch.zeros_like(pressure)
-        geom_annulus = inputs[:, 7] if inputs.shape[1] > 7 else torch.zeros_like(pressure)
-        
-        # Get CHF parameters
-        ln_A = self.chf_params['ln_A']
-        B = self.chf_params['B'] 
-        n1 = self.chf_params['n1']
-        n2 = self.chf_params['n2']
-        n3 = self.chf_params['n3']
-        n4 = self.chf_params['n4']
-        n5 = self.chf_params['n5']
-        n6 = self.chf_params['n6']
-        
-        # CHF equation: ln(chf_exp) = ln(A) + n1*ln(mass_flux) + n2*ln(pressure) + n3*ln(1 + B*x_e_out) + n4*ln(length) + n5*geom_tube + n6*geom_annulus
-        ln_chf_physics = (ln_A + 
-                         n1 * torch.log(mass_flux) + 
-                         n2 * torch.log(pressure) + 
-                         n3 * torch.log(torch.abs(1 + B * x_e_out) + eps) + 
-                         n4 * torch.log(length) + 
-                         n5 * geom_tube + 
-                         n6 * geom_annulus)
-        
-        # Convert to actual CHF values
-        chf_physics = torch.exp(ln_chf_physics)
-        
-        # Neural network prediction (convert from scaled space if needed)
-        chf_pred = predictions.squeeze()
-        
-        # Convert predictions back to original scale for physics comparison
-        if hasattr(self, 'target_scaler') and self.target_scaler is not None:
-            # Convert to numpy for inverse transform, then back to torch
-            chf_pred_np = chf_pred.detach().cpu().numpy().reshape(-1, 1)
-            chf_pred_unscaled = self.target_scaler.inverse_transform(chf_pred_np).flatten()
-            chf_pred_original = torch.tensor(chf_pred_unscaled, device=self.device)
+        """Physics loss using ONLY the Bowring correlation."""
+        # Step 1: Convert inputs to SI units
+        eps = 1e-8  # Small epsilon to avoid division/log(0)
+        pressure_Pa = (torch.abs(inputs[:, 0]) + eps) * 1e6      # MPa → Pa
+        mass_flux = torch.abs(inputs[:, 1]) + eps                 # kg/m²·s
+        x_e_out = inputs[:, 2]                                    # Can be negative
+        length_m = (torch.abs(inputs[:, 5]) + eps) * 1e-3          # mm → m
+
+        # Step 2: Compute Δh_sub,in (simplified: Δh_sub,in ≈ h_fg * (1 - x_e_out))
+        h_fg = torch.stack([
+            torch.tensor(CP.PropsSI('Hvap', 'P', p.item(), 'Q', 1, 'Water'), 
+            device=self.device
+        ) for p in pressure_Pa])
+        Δh_sub_in = h_fg * (1 - x_e_out)  # [J/kg]
+
+        # Step 3: Bowring equation (all terms in SI units)
+        A = self.bowring_params['A']
+        B = self.bowring_params['B']
+        C = self.bowring_params['C']
+        D = self.bowring_params['D']
+        q_chf_bowring = (A + B * Δh_sub_in) / (C + D * x_e_out)  # [W/m²]
+
+        # Step 4: Convert NN predictions to W/m² (if scaled)
+        q_chf_pred = predictions.squeeze()
+        if hasattr(self, 'target_scaler'):
+            q_chf_pred = self.target_scaler.inverse_transform(
+                q_chf_pred.cpu().numpy().reshape(-1, 1)
+            ).flatten()
+            q_chf_pred = torch.tensor(q_chf_pred, device=self.device) * 1e6  # MW/m² → W/m²
         else:
-            chf_pred_original = chf_pred
-            
-        # Physics constraint: Neural network prediction should follow CHF equation
-        physics_loss = torch.mean((chf_pred_original - chf_physics) ** 2)
+            q_chf_pred = q_chf_pred * 1e6
+
+        # Step 5: Physics loss (MSE between predictions and Bowring)
+        physics_loss = torch.mean((q_chf_pred - q_chf_bowring) ** 2)
+
+        # Step 6: Parameter constraints (optional)
+        # Example: Ensure denominators (C + D*x_e_out) are positive
+        denominator = C + D * x_e_out
+        penalty = torch.mean(torch.relu(-denominator) ** 2)  # Penalize C + D*x_e < 0
+        physics_loss += 0.1 * penalty
         
-        # Additional physics constraints
-        physics_losses = [physics_loss]
-        
-        # 1. Ensure CHF is positive
-        negative_chf = torch.relu(-chf_pred_original)
-        physics_losses.append(torch.mean(negative_chf ** 2))
-        
-        # 2. Parameter bounds (soft constraints)
-        # Mass flux exponent should be positive (n1 > 0)
-        n1_constraint = torch.relu(-n1) ** 2
-        physics_losses.append(n1_constraint)
-        
-        # Pressure exponent should be positive (n2 > 0)  
-        n2_constraint = torch.relu(-n2) ** 2
-        physics_losses.append(n2_constraint)
-        
-        # Length exponent should be negative (n4 < 0)
-        n4_constraint = torch.relu(n4) ** 2
-        physics_losses.append(n4_constraint)
-        
-        # Combine all physics losses
-        weights = [1.0, 0.1, 0.1, 0.1, 0.1]  # Main equation loss has highest weight
-        total_physics_loss = sum(w * loss for w, loss in zip(weights, physics_losses))
-        
-        # Debug logging
-        if self.debug and torch.rand(1).item() < 0.01:  # Log 1% of batches
-            print(f"CHF Physics Loss: {physics_loss.item():.6f}")
-            print(f"CHF Parameters: ln_A={ln_A.item():.3f}, B={B.item():.3f}, n1={n1.item():.3f}, n2={n2.item():.3f}, n3={n3.item():.3f}, n4={n4.item():.3f}")
-            print(f"Total Physics Loss: {total_physics_loss.item():.6f}")
-        
-        # Safety check
-        if not torch.isfinite(total_physics_loss).all():
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
-        
-        return total_physics_loss
+        print(f"h_fg (J/kg): {h_fg.mean().item():.2f}")
+        print(f"Δh_sub_in (J/kg): {Δh_sub_in.mean().item():.2f}")
+        print(f"Bowring CHF (W/m²): {q_chf_bowring.mean().item():.2f}")
+
+        return physics_loss
 
     def _prepare_data(self, data: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
         """Converts DataFrame to tensors and initializes model if needed."""
