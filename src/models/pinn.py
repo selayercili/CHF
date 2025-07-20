@@ -42,10 +42,9 @@ class Pinn:
         
         # CHF Equation Parameters (learnable)
         self.bowring_params = {
-        'A': nn.Parameter(torch.tensor(0.5)),   # Base coefficient
-        'B': nn.Parameter(torch.tensor(1e-4)),  # Subcooling coefficient
-        'C': nn.Parameter(torch.tensor(0.1)),   # Quality offset
-        'D': nn.Parameter(torch.tensor(1.0))    # Quality coefficient
+            'A': nn.Parameter(torch.tensor(0.5)),   # Base coefficient
+            'B': nn.Parameter(torch.tensor(1e-4)),  # Quality coefficient
+            'C': nn.Parameter(torch.tensor(0.1))    # Length offset
         }
         
         # Register parameters
@@ -77,43 +76,6 @@ class Pinn:
             'chf_Wm2': chf_Wm2  # Only included if chf_exp was passed
         }
         
-    def _compute_subcooling(self, vars_si: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """
-        Compute inlet subcooling Δh_sub,in [J/kg] using CoolProp and flow parameters.
-        
-        Args:
-            vars_si: Dictionary containing SI-unit-converted variables:
-                - pressure_Pa (torch.Tensor): Pressure in Pascals.
-                - mass_flux (torch.Tensor): Mass flux in kg/m²·s.
-                - x_e_out (torch.Tensor): Equilibrium quality at outlet.
-                - D_h_m (torch.Tensor): Hydraulic diameter in meters.
-                - length_m (torch.Tensor): Heated length in meters.
-                - chf_Wm2 (torch.Tensor, optional): Critical heat flux in W/m².
-        
-        Returns:
-            torch.Tensor: Δh_sub,in [J/kg].
-        """
-        pressure_Pa = vars_si['pressure_Pa']
-        x_e_out = vars_si['x_e_out']
-        mass_flux = vars_si['mass_flux']
-        length_m = vars_si['length_m']
-        D_h_m = vars_si['D_h_m']
-        chf_Wm2 = vars_si.get('chf_Wm2', None)  # Optional if CHF is needed
-
-        # Get fluid properties using CoolProp
-        h_f = torch.stack([
-            torch.tensor(CP.PropsSI('H', 'P', p.item(), 'Q', 0, 'Water'), device=self.device)
-            for p in pressure_Pa
-        ])  # Saturated liquid enthalpy [J/kg]
-        
-        h_fg = torch.stack([
-            torch.tensor(CP.PropsSI('Hvap', 'P', p.item(), 'Q', 1, 'Water'), device=self.device)
-            for p in pressure_Pa
-        ])  # Latent heat [J/kg]
-
-        Δh_sub_in = (-x_e_out * h_fg) + (4 * chf_Wm2 * length_m)/(mass_flux * D_h_m) #formula I have derived for tubes but shoul work for other geometries in theory
-
-        return Δh_sub_in
 
     def _build_model(self, input_size: int) -> nn.Module:
         """Enhanced 4-layer MLP with better initialization and dropout."""
@@ -143,54 +105,48 @@ class Pinn:
         return model
 
     def _physics_loss(self, inputs: torch.Tensor, predictions: torch.Tensor) -> torch.Tensor:
-        """Physics loss using ONLY the Bowring correlation."""
-        # Step 1: Convert inputs to SI units
-        eps = 1e-8  # Small epsilon to avoid division/log(0)
-        pressure_Pa = (torch.abs(inputs[:, 1]) + eps) * 1e6      # MPa → Pa
-        mass_flux = torch.abs(inputs[:, 2]) + eps                 # kg/m²·s
-        x_e_out = inputs[:, 3]                                    # Can be negative
-        length_m = (torch.abs(inputs[:, 6]) + eps) * 1e-3          # mm → m
+        """Physics loss using the new CHF equation."""
+        # Convert inputs to SI units
         converted = self._convert_units(inputs)
-        chf_Wm2 = converted['chf_Wm2']                             #MW/m2 → W/m2
-        D_h_m = D_h_m = (torch.abs(inputs[:, 5]) + eps) * 1e-3
-
-        # Step 2: Compute Δh_sub,in (simplified: Δh_sub,in ≈ h_fg * (1 - x_e_out))
+        pressure_Pa = converted['pressure_Pa']
+        mass_flux = converted['mass_flux']
+        x_e_out = converted['x_e_out']
+        D_h_m = converted['D_h_m']
+        length_m = converted['length_m']
+        
+        # Get latent heat using CoolProp
         h_fg = torch.stack([
             torch.tensor(CP.PropsSI('Hvap', 'P', p.item(), 'Q', 1, 'Water'), 
             device=self.device
         ) for p in pressure_Pa])
-        Δh_sub_in = (-x_e_out * h_fg) + (4 * chf_Wm2 * length_m)/(mass_flux * D_h_m)
-
-        # Step 3: Bowring equation (all terms in SI units)
+        
+        # Extract parameters
         A = self.bowring_params['A']
         B = self.bowring_params['B']
         C = self.bowring_params['C']
-        D = self.bowring_params['D']
-        q_chf_bowring = (A + B * Δh_sub_in) / (C + D * x_e_out)  # [W/m²]
-
-        # Step 4: Convert NN predictions to W/m² (if scaled)
+        
+        # Calculate new CHF equation
+        numerator = A - B * x_e_out * h_fg
+        denominator = C + length_m - (4 * B * length_m) / (mass_flux * D_h_m)
+        q_chf_new = numerator / denominator
+        
+        # Convert model predictions to W/m²
         q_chf_pred = predictions.squeeze()
         if hasattr(self, 'target_scaler'):
             q_chf_pred = self.target_scaler.inverse_transform(
                 q_chf_pred.cpu().numpy().reshape(-1, 1)
             ).flatten()
-            q_chf_pred = torch.tensor(q_chf_pred, device=self.device) * 1e6  # MW/m² → W/m²
+            q_chf_pred = torch.tensor(q_chf_pred, device=self.device) * 1e6
         else:
             q_chf_pred = q_chf_pred * 1e6
 
-        # Step 5: Physics loss (MSE between predictions and Bowring)
-        physics_loss = torch.mean((q_chf_pred - q_chf_bowring) ** 2)
-
-        # Step 6: Parameter constraints (optional)
-        # Example: Ensure denominators (C + D*x_e_out) are positive
-        denominator = C + D * x_e_out
-        penalty = torch.mean(torch.relu(-denominator) ** 2)  # Penalize C + D*x_e < 0
+        # Physics loss (MSE between predictions and new equation)
+        physics_loss = torch.mean((q_chf_pred - q_chf_new) ** 2)
+        
+        # Add penalty for negative denominators
+        penalty = torch.mean(torch.relu(-denominator) ** 2)
         physics_loss += 0.1 * penalty
         
-        print(f"h_fg (J/kg): {h_fg.mean().item():.2f}")
-        print(f"Δh_sub_in (J/kg): {Δh_sub_in.mean().item():.2f}")
-        print(f"Bowring CHF (W/m²): {q_chf_bowring.mean().item():.2f}")
-
         return physics_loss
 
     def _prepare_data(self, data: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
