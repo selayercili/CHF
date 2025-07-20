@@ -325,7 +325,7 @@ class Pinn:
         if 'bowring_params' in checkpoint:
             self.bowring_params = checkpoint['bowring_params']
             
-        return checkpoint
+        return checkpoint.get('metadata', {})
 
     def get_feature_importance(self) -> pd.DataFrame:
         """Gradient-based feature importance (similar to NN)."""
