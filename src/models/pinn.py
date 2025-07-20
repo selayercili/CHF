@@ -379,3 +379,7 @@ class Pinn:
     def get_chf_parameters(self) -> Dict[str, float]:
         """Returns the learned CHF equation parameters."""
         return {name: param.item() for name, param in self.bowring_params.items()}
+    
+model_registry = {
+    'pinn': Pinn  # This makes the Pinn class available to the testing script
+}
