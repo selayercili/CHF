@@ -136,7 +136,7 @@ class Pinn:
                 torch.nn.init.zeros_(layer.bias)
         
         # Move CHF parameters to device and register them
-        for name, param in self.chf_params.items():
+        for name, param in self.bowring_params_params.items():
             param.data = param.data.to(self.device)
             model.register_parameter(f'chf_{name}', param)
         
@@ -327,7 +327,7 @@ class Pinn:
             'is_fitted': self.is_fitted,
             'input_scaler': self.input_scaler,
             'target_scaler': self.target_scaler,
-            'chf_params': self.chf_params  # Save CHF parameters
+            'bowring_params': self.bowring_params  # Save CHF parameters
         }
         if metadata:
             save_dict.update(metadata)
@@ -360,8 +360,8 @@ class Pinn:
             self.target_scaler = checkpoint['target_scaler']
         
         # Load CHF parameters if they exist
-        if 'chf_params' in checkpoint:
-            self.chf_params = checkpoint['chf_params']
+        if 'bowring_params' in checkpoint:
+            self.bowring_params = checkpoint['bowring_params']
             
         return checkpoint
 
@@ -378,4 +378,4 @@ class Pinn:
     
     def get_chf_parameters(self) -> Dict[str, float]:
         """Returns the learned CHF equation parameters."""
-        return {name: param.item() for name, param in self.chf_params.items()}
+        return {name: param.item() for name, param in self.bowring_params.items()}
