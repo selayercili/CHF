@@ -136,7 +136,7 @@ class Pinn:
                 torch.nn.init.zeros_(layer.bias)
         
         # Move CHF parameters to device and register them
-        for name, param in self.bowring_params_params.items():
+        for name, param in self.bowring_params.items():
             param.data = param.data.to(self.device)
             model.register_parameter(f'chf_{name}', param)
         
@@ -150,7 +150,8 @@ class Pinn:
         mass_flux = torch.abs(inputs[:, 2]) + eps                 # kg/m²·s
         x_e_out = inputs[:, 3]                                    # Can be negative
         length_m = (torch.abs(inputs[:, 6]) + eps) * 1e-3          # mm → m
-        chf_Wm2 = (torch.abs(inputs[:, 8]) + eps) * 1e6           #MW/m2 → W/m2
+        converted = self._convert_units(inputs)
+        chf_Wm2 = converted['chf_Wm2']                             #MW/m2 → W/m2
         D_h_m = D_h_m = (torch.abs(inputs[:, 5]) + eps) * 1e-3
 
         # Step 2: Compute Δh_sub,in (simplified: Δh_sub,in ≈ h_fg * (1 - x_e_out))
@@ -358,6 +359,11 @@ class Pinn:
             self.input_scaler = checkpoint['input_scaler']
         if 'target_scaler' in checkpoint:
             self.target_scaler = checkpoint['target_scaler']
+        
+        if self.model is None:
+            self.model = self._build_model(self.input_size)
+            self.optimizer = torch.optim.Adam(self.model.parameters(), 
+                                            lr=self.learning_rate)
         
         # Load CHF parameters if they exist
         if 'bowring_params' in checkpoint:
