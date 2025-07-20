@@ -104,48 +104,66 @@ class Pinn:
 
     def _physics_loss(self, inputs: torch.Tensor, predictions: torch.Tensor) -> torch.Tensor:
         """Physics loss using the new CHF equation."""
-        # Convert inputs to SI units
-        converted = self._convert_units(inputs)
-        pressure_Pa = converted['pressure_Pa']
-        mass_flux = converted['mass_flux']
-        x_e_out = converted['x_e_out']
-        D_h_m = converted['D_h_m']
-        length_m = converted['length_m']
-        
-        # Get latent heat using CoolProp
-        h_fg = torch.stack([
-            torch.tensor(CP.PropsSI('Hvap', 'P', p.item(), 'Q', 1, 'Water'), 
-            device=self.device
-        ) for p in pressure_Pa])
-        
-        # Extract parameters
-        A = self.bowring_params['A']
-        B = self.bowring_params['B']
-        C = self.bowring_params['C']
-        
-        # Calculate new CHF equation
-        numerator = A - B * x_e_out * h_fg
-        denominator = C + length_m - (4 * B * length_m) / (mass_flux * D_h_m)
-        q_chf_new = numerator / denominator
-        
-        # Convert model predictions to W/m²
-        q_chf_pred = predictions.squeeze()
-        if hasattr(self, 'target_scaler'):
-            q_chf_pred = self.target_scaler.inverse_transform(
-                q_chf_pred.cpu().numpy().reshape(-1, 1)
-            ).flatten()
-            q_chf_pred = torch.tensor(q_chf_pred, device=self.device) * 1e6
-        else:
-            q_chf_pred = q_chf_pred * 1e6
+        try:
+            # Convert inputs to SI units
+            converted = self._convert_units(inputs)
+            pressure_Pa = converted['pressure_Pa']
+            mass_flux = converted['mass_flux']
+            x_e_out = converted['x_e_out']
+            D_h_m = converted['D_h_m']
+            length_m = converted['length_m']
+            
+            # Get latent heat using CoolProp (h_fg = h_g - h_f)
+            # Ensure pressures are within valid range for water (triple point to critical point)
+            min_pressure = 1000.0  # 1 kPa (above triple point)
+            max_pressure = 20e6    # 20 MPa (below critical point)
+            pressure_Pa_clamped = torch.clamp(pressure_Pa, min=min_pressure, max=max_pressure)
+            
+            h_fg = torch.stack([
+                torch.tensor(
+                    CP.PropsSI('H', 'P', p.item(), 'Q', 1, 'Water') -  # Saturated vapor enthalpy
+                    CP.PropsSI('H', 'P', p.item(), 'Q', 0, 'Water'),   # Saturated liquid enthalpy
+                    device=self.device
+                ) for p in pressure_Pa_clamped])
+            
+            # Extract parameters
+            A = self.bowring_params['A']
+            B = self.bowring_params['B']
+            C = self.bowring_params['C']
+            
+            # Calculate new CHF equation
+            numerator = A - B * x_e_out * h_fg
+            denominator = C + length_m - (4 * B * length_m) / (mass_flux * D_h_m)
+            
+            # Add small epsilon to avoid division by zero
+            denominator = denominator + 1e-8
+            
+            q_chf_new = numerator / denominator
+            
+            # Convert model predictions to W/m²
+            q_chf_pred = predictions.squeeze()
+            if hasattr(self, 'target_scaler'):
+                q_chf_pred = self.target_scaler.inverse_transform(
+                    q_chf_pred.cpu().numpy().reshape(-1, 1)
+                ).flatten()
+                q_chf_pred = torch.tensor(q_chf_pred, device=self.device) * 1e6
+            else:
+                q_chf_pred = q_chf_pred * 1e6
 
-        # Physics loss (MSE between predictions and new equation)
-        physics_loss = torch.mean((q_chf_pred - q_chf_new) ** 2)
-        
-        # Add penalty for negative denominators
-        penalty = torch.mean(torch.relu(-denominator) ** 2)
-        physics_loss += 0.1 * penalty
-        
-        return physics_loss
+            # Physics loss (MSE between predictions and new equation)
+            physics_loss = torch.mean((q_chf_pred - q_chf_new) ** 2)
+            
+            # Add penalty for negative denominators
+            penalty = torch.mean(torch.relu(-denominator) ** 2)
+            physics_loss += 0.1 * penalty
+            
+            return physics_loss
+            
+        except Exception as e:
+            # If physics calculation fails, return a default loss
+            print(f"Warning: Physics loss calculation failed: {str(e)}")
+            # Return pure data loss as fallback
+            return torch.tensor(0.0, device=self.device)
 
     def _prepare_data(self, data: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
         """Converts DataFrame to tensors and initializes model if needed."""
