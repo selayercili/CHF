@@ -7,7 +7,7 @@ import torch # type: ignore
 import torch.nn as nn # type: ignore
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional, Tuple  # <-- Added Tuple import
+from typing import Dict, Any, Optional, Tuple
 from pathlib import Path
 import pickle
 from sklearn.preprocessing import StandardScaler
@@ -40,16 +40,14 @@ class Pinn:
         self.debug = kwargs.get('debug', False)
         self.physics_warmup_epochs = kwargs.get('physics_warmup_epochs', 10)  # Gradually introduce physics
         
-        # CHF Equation Parameters (learnable)
-        self.bowring_params = {
-            'A': nn.Parameter(torch.tensor(0.5)),   # Base coefficient
-            'B': nn.Parameter(torch.tensor(1e-4)),  # Quality coefficient
-            'C': nn.Parameter(torch.tensor(0.1))    # Length offset
+        # CHF Equation Parameters (will be registered to model later)
+        # Store initial values, actual nn.Parameters created in _build_model
+        self.chf_param_init = {
+            'A': 0.5,   # Base coefficient
+            'B': 1e-4,  # Quality coefficient
+            'C': 0.1    # Length offset
         }
-        
-        # Register parameters
-        for name, param in self.bowring_params.items():
-            self.register_parameter(f'bowring_{name}', param)
+        self.bowring_params = {}  # Will hold actual nn.Parameters after model creation
 
     def _convert_units(self, inputs: torch.Tensor, chf_exp: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """Convert inputs to SI units and scale CHF from MW/m² to W/m²."""
@@ -76,7 +74,6 @@ class Pinn:
             'chf_Wm2': chf_Wm2  # Only included if chf_exp was passed
         }
         
-
     def _build_model(self, input_size: int) -> nn.Module:
         """Enhanced 4-layer MLP with better initialization and dropout."""
         model = nn.Sequential(
@@ -97,10 +94,11 @@ class Pinn:
                 torch.nn.init.xavier_uniform_(layer.weight)
                 torch.nn.init.zeros_(layer.bias)
         
-        # Move CHF parameters to device and register them
-        for name, param in self.bowring_params.items():
-            param.data = param.data.to(self.device)
+        # Create CHF parameters as nn.Parameters and register them to the model
+        for name, init_value in self.chf_param_init.items():
+            param = nn.Parameter(torch.tensor(init_value, device=self.device))
             model.register_parameter(f'chf_{name}', param)
+            self.bowring_params[name] = param  # Store reference
         
         return model
 
@@ -274,21 +272,36 @@ class Pinn:
 
     def save(self, path: Path, metadata: Dict[str, Any] = None):
         """Saves model state."""
+        if self.model is None:
+            raise ValueError("Model not initialized - nothing to save")
+        
+        # Extract CHF parameters as regular values (not nn.Parameter objects)
+        chf_params_dict = {name: param.item() for name, param in self.bowring_params.items()}
+        
         save_dict = {
             'model_state': self.model.state_dict(),
-            'optimizer_state': self.optimizer.state_dict(),
+            'optimizer_state': self.optimizer.state_dict() if self.optimizer else None,
             'epoch': self.epoch,
             'input_size': self.input_size,
             'hidden_size': self.hidden_size,
             'lambda_physics': self.lambda_physics,
             'is_fitted': self.is_fitted,
-            'input_scaler': self.input_scaler,
-            'target_scaler': self.target_scaler,
-            'bowring_params': self.bowring_params  # Save CHF parameters
+            # Serialize scalers like in NN model
+            'input_scaler': pickle.dumps(self.input_scaler),
+            'target_scaler': pickle.dumps(self.target_scaler),
+            'chf_params': chf_params_dict  # Save as regular dict, not nn.Parameters
         }
+        
         if metadata:
-            save_dict.update(metadata)
+            save_dict['metadata'] = metadata
+        
+        # Ensure path has .pth extension (CRITICAL FIX)
+        path = Path(path)
+        if not path.suffix:
+            path = path.with_suffix('.pth')
+            
         torch.save(save_dict, path)
+        print(f"✓ Saved PINN model to {path}")
 
     def load(self, path: Path):
         """Loads model state with proper handling of sklearn objects."""
@@ -303,28 +316,36 @@ class Pinn:
         self.input_size = checkpoint['input_size']
         self.hidden_size = checkpoint['hidden_size']
         self.lambda_physics = checkpoint['lambda_physics']
-        self.model = self._build_model(self.input_size)
-        self.model.load_state_dict(checkpoint['model_state'])
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
-        self.optimizer.load_state_dict(checkpoint['optimizer_state'])
         self.epoch = checkpoint['epoch']
         self.is_fitted = checkpoint['is_fitted']
         
-        # Load scalers if they exist
+        # Load scalers (they were pickled)
         if 'input_scaler' in checkpoint:
-            self.input_scaler = checkpoint['input_scaler']
+            self.input_scaler = pickle.loads(checkpoint['input_scaler'])
         if 'target_scaler' in checkpoint:
-            self.target_scaler = checkpoint['target_scaler']
+            self.target_scaler = pickle.loads(checkpoint['target_scaler'])
         
-        if self.model is None:
-            self.model = self._build_model(self.input_size)
-            self.optimizer = torch.optim.Adam(self.model.parameters(), 
-                                            lr=self.learning_rate)
+        # Load CHF parameter initial values if available
+        if 'chf_params' in checkpoint:
+            self.chf_param_init = checkpoint['chf_params']
         
-        # Load CHF parameters if they exist
-        if 'bowring_params' in checkpoint:
-            self.bowring_params = checkpoint['bowring_params']
-            
+        # Build model and load state
+        self.model = self._build_model(self.input_size)
+        self.model.load_state_dict(checkpoint['model_state'])
+        
+        # Rebuild optimizer
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        if checkpoint.get('optimizer_state'):
+            self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+        
+        # Update bowring_params references to the loaded parameters
+        for name in self.chf_param_init.keys():
+            param_name = f'chf_{name}'
+            if hasattr(self.model, param_name):
+                self.bowring_params[name] = getattr(self.model, param_name)
+        
+        print(f"✓ Loaded PINN model from {path} (epoch {self.epoch})")
+        
         return checkpoint.get('metadata', {})
 
     def get_feature_importance(self) -> pd.DataFrame:
@@ -341,4 +362,3 @@ class Pinn:
     def get_chf_parameters(self) -> Dict[str, float]:
         """Returns the learned CHF equation parameters."""
         return {name: param.item() for name, param in self.bowring_params.items()}
-    
