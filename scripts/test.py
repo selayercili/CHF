@@ -183,12 +183,19 @@ class ModelTester:
         # Load weights
         try:
             if hasattr(model, 'load'):
+                if model_name == "pinn":
+                    # PINN requires explicit model initialization
+                    if model.model is None and 'input_size' in checkpoint:
+                        model.input_size = checkpoint['input_size']
+                        model.model = model._build_model(model.input_size)
+                        model.optimizer = torch.optim.Adam(model.model.parameters(), 
+                                                        lr=model.learning_rate)
                 # Model has custom load method
                 metadata = model.load(weights_path)
                 self.logger.info(f"Loaded model from epoch: {model.epoch if hasattr(model, 'epoch') else 'unknown'}")
             else:
                 # Generic loading
-                import torch
+                import torch    
                 checkpoint = torch.load(weights_path, map_location='cpu', weights_only=False)
                 
                 if 'model_state_dict' in checkpoint:

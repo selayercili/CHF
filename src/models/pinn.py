@@ -380,6 +380,3 @@ class Pinn:
         """Returns the learned CHF equation parameters."""
         return {name: param.item() for name, param in self.bowring_params.items()}
     
-model_registry = {
-    'pinn': Pinn  # This makes the Pinn class available to the testing script
-}
