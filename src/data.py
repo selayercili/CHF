@@ -474,23 +474,58 @@ def perform_clustering(data_path: Optional[Path] = None,
         import json
         metrics_path = results_dir / 'clustering_metrics.json'
         
-        # Convert numpy arrays to lists for JSON serialization
-        results_for_json = clustering_results.copy()
+        # Create a deep copy and properly convert all data types for JSON serialization
+        def make_json_serializable(obj):
+            """Recursively convert object to JSON-serializable format."""
+            if isinstance(obj, dict):
+                return {key: make_json_serializable(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [make_json_serializable(item) for item in obj]
+            elif isinstance(obj, tuple):
+                return [make_json_serializable(item) for item in obj]
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, (np.integer, np.int32, np.int64)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float32, np.float64)):
+                return float(obj)
+            elif isinstance(obj, np.bool_):
+                return bool(obj)
+            elif obj is None or isinstance(obj, (str, int, float, bool)):
+                return obj
+            else:
+                # For any other type, try to convert to string
+                return str(obj)
+        
+        # Convert clustering results for JSON
+        results_for_json = make_json_serializable(clustering_results.copy())
+        
+        # Remove cluster labels from JSON (too large and not needed for metrics)
         for alg_name, alg_data in results_for_json['algorithms'].items():
-            if 'inertias' in alg_data:
-                alg_data['inertias'] = [float(x) for x in alg_data['inertias']]
-            if 'silhouette_scores' in alg_data:
-                alg_data['silhouette_scores'] = [float(x) for x in alg_data['silhouette_scores']]
-            
-            # Remove cluster labels from JSON (too large)
             if 'results' in alg_data:
                 for k, v in alg_data['results'].items():
                     if 'labels' in v:
                         del v['labels']
         
-        with open(metrics_path, 'w') as f:
-            json.dump(results_for_json, f, indent=2)
-        logger.info(f"✓ Clustering metrics saved: {metrics_path}")
+        try:
+            with open(metrics_path, 'w') as f:
+                json.dump(results_for_json, f, indent=2, ensure_ascii=False)
+            logger.info(f"✓ Clustering metrics saved: {metrics_path}")
+        except Exception as e:
+            logger.error(f"Failed to save clustering metrics: {e}")
+            # Save a simplified version with just the key metrics
+            simplified_metrics = {
+                'data_shape': list(clustering_results['data_shape']),
+                'feature_names': clustering_results['feature_names'],
+                'kmeans_optimal_k': clustering_results['algorithms']['kmeans']['optimal_k'],
+                'kmeans_best_silhouette': float(max(clustering_results['algorithms']['kmeans']['silhouette_scores'])),
+                'hierarchical_optimal_k': clustering_results['algorithms']['hierarchical']['optimal_k'],
+                'dbscan_best_eps': clustering_results['algorithms']['dbscan']['best_eps']
+            }
+            
+            with open(metrics_path, 'w') as f:
+                json.dump(simplified_metrics, f, indent=2)
+            logger.info(f"✓ Simplified clustering metrics saved: {metrics_path}")
     
     logger.info("✓ Clustering analysis completed")
     return clustering_results
