@@ -8,7 +8,8 @@ This script handles the complete data pipeline:
 2. Performs train/test split
 3. Preprocesses data (encoding, scaling)
 4. Creates EDA plots
-5. Saves processed data
+5. Performs clustering analysis
+6. Saves processed data
 
 Usage:
     python scripts/download_and_organize.py [--force-download] [--test-size TEST_SIZE]
@@ -24,7 +25,7 @@ sys.path.append(str(project_root))
 
 # Imports after path setup
 from src.utils import setup_logging, get_logger
-from src.data import download_dataset, split_data, create_eda_plots, check_data_quality
+from src.data import download_dataset, split_data, create_eda_plots, check_data_quality, perform_clustering
 from src.utils.data_utils import save_data_splits
 
 
@@ -46,6 +47,9 @@ Examples:
   
   # Skip visualization
   python scripts/download_and_organize.py --skip-viz
+  
+  # Skip clustering
+  python scripts/download_and_organize.py --skip-clustering
         """
     )
     
@@ -66,6 +70,12 @@ Examples:
         '--skip-viz',
         action='store_true',
         help='Skip visualization step'
+    )
+    
+    parser.add_argument(
+        '--skip-clustering',
+        action='store_true',
+        help='Skip clustering analysis step'
     )
     
     parser.add_argument(
@@ -136,6 +146,36 @@ Examples:
     else:
         logger.info("\n=== Step 4: Skipping Visualization ===")
     
+    # Step 5: Clustering analysis
+    if not args.skip_clustering:
+        logger.info("\n=== Step 5: Clustering Analysis ===")
+        try:
+            clustering_results = perform_clustering(
+                data_path=train_path,
+                n_clusters_range=(2, 8),
+                save_results=True
+            )
+            logger.info("✓ Clustering analysis completed successfully")
+            
+            # Log summary of clustering results
+            kmeans_optimal = clustering_results['algorithms']['kmeans']['optimal_k']
+            hierarchical_optimal = clustering_results['algorithms']['hierarchical']['optimal_k']
+            logger.info(f"  - K-Means optimal clusters: {kmeans_optimal}")
+            logger.info(f"  - Hierarchical optimal clusters: {hierarchical_optimal}")
+            
+            dbscan_best_eps = clustering_results['algorithms']['dbscan']['best_eps']
+            if dbscan_best_eps:
+                dbscan_clusters = clustering_results['algorithms']['dbscan']['results'][dbscan_best_eps]['n_clusters']
+                logger.info(f"  - DBSCAN optimal: eps={dbscan_best_eps}, clusters={dbscan_clusters}")
+            else:
+                logger.info("  - DBSCAN: No valid clustering found")
+            
+        except Exception as e:
+            logger.error(f"Clustering analysis failed: {str(e)}")
+            # Don't exit - clustering is optional
+    else:
+        logger.info("\n=== Step 5: Skipping Clustering Analysis ===")
+    
     # Summary
     logger.info("\n" + "="*60)
     logger.info("Pipeline Summary")
@@ -145,6 +185,8 @@ Examples:
     logger.info("✓ Data preprocessed and encoded")
     if not args.skip_viz:
         logger.info("✓ EDA plots generated")
+    if not args.skip_clustering:
+        logger.info("✓ Clustering analysis performed")
     
     logger.info("\n✅ Data pipeline completed successfully!")
     logger.info("Ready for model training - run: python scripts/train.py")

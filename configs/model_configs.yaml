@@ -95,7 +95,7 @@ pinn:
     warmup_epochs: 10  # Gradually introduce physics
     adaptive_weighting: true
   training:
-    epochs: 200
+    epochs: 100
     batch_size: 64
     validation_split: 0.2
     checkpoint_frequency: 10  # Save every N epochs

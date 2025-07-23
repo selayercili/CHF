@@ -7,6 +7,7 @@ This module provides functions for:
 - Data preprocessing and encoding
 - Train/test splitting
 - Feature engineering
+- Clustering analysis
 """
 
 import os
@@ -17,7 +18,9 @@ from typing import Tuple, Optional, Dict, List, Any
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 import logging
 
 # Try to import kagglehub
@@ -143,7 +146,7 @@ def download_dataset(force_download: bool = False) -> bool:
 def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     Preprocess the CHF dataframe:
-    - Remove unnecessary columns
+    - Remove unnecessary columns (author, id, D_e [mm])
     - Encode categorical variables
     - Clean column names
     - Handle missing values
@@ -163,10 +166,12 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
     logger.debug(f"Initial shape: {df_processed.shape}")
     logger.debug(f"Initial columns: {list(df_processed.columns)}")
     
-    # Remove author column if present
-    if 'author' in df_processed.columns:
-        df_processed = df_processed.drop('author', axis=1)
-        logger.info("✓ Removed 'author' column")
+    # Remove unnecessary columns
+    columns_to_drop = ['author', 'id', 'D_e [mm]']
+    for col in columns_to_drop:
+        if col in df_processed.columns:
+            df_processed = df_processed.drop(col, axis=1)
+            logger.info(f"✓ Removed '{col}' column")
     
     # Handle categorical columns
     categorical_columns = df_processed.select_dtypes(include=['object']).columns.tolist()
@@ -259,6 +264,236 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
         logger.info("✓ All columns are numeric")
     
     return df_processed
+
+
+def perform_clustering(data_path: Optional[Path] = None, 
+                      n_clusters_range: Tuple[int, int] = (2, 10),
+                      save_results: bool = True) -> Dict[str, Any]:
+    """
+    Perform clustering analysis on the CHF data.
+    
+    Args:
+        data_path: Path to processed data (defaults to train.csv)
+        n_clusters_range: Range of clusters to test for K-means
+        save_results: Whether to save clustering results
+        
+    Returns:
+        Dictionary containing clustering results and metrics
+    """
+    logger.info("Starting clustering analysis...")
+    
+    # Setup paths
+    if data_path is None:
+        data_path = Path('data/processed/train.csv')
+    
+    if not data_path.exists():
+        raise FileNotFoundError(f"Data file not found: {data_path}")
+    
+    # Load data
+    df = pd.read_csv(data_path)
+    logger.info(f"✓ Loaded data: {df.shape}")
+    
+    # Separate features and target
+    target_columns = [col for col in df.columns if 'chf_exp' in col.lower()]
+    if target_columns:
+        target_col = target_columns[0]
+        X = df.drop(target_col, axis=1)
+        y = df[target_col]
+    else:
+        # If no clear target, use all columns for clustering
+        X = df
+        y = None
+        logger.info("No target column found, using all features for clustering")
+    
+    logger.info(f"✓ Features for clustering: {X.shape[1]} columns, {X.shape[0]} samples")
+    
+    # Scale features for clustering
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    logger.info("✓ Features scaled for clustering")
+    
+    # Results storage
+    clustering_results = {
+        'data_shape': X.shape,
+        'feature_names': list(X.columns),
+        'algorithms': {}
+    }
+    
+    # 1. K-Means clustering with elbow method
+    logger.info("\n=== K-Means Clustering ===")
+    kmeans_results = {}
+    inertias = []
+    silhouette_scores = []
+    
+    min_clusters, max_clusters = n_clusters_range
+    for k in range(min_clusters, max_clusters + 1):
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+        cluster_labels = kmeans.fit_predict(X_scaled)
+        
+        # Calculate metrics
+        inertia = kmeans.inertia_
+        silhouette_avg = silhouette_score(X_scaled, cluster_labels)
+        calinski_harabasz = calinski_harabasz_score(X_scaled, cluster_labels)
+        davies_bouldin = davies_bouldin_score(X_scaled, cluster_labels)
+        
+        inertias.append(inertia)
+        silhouette_scores.append(silhouette_avg)
+        
+        kmeans_results[k] = {
+            'inertia': inertia,
+            'silhouette_score': silhouette_avg,
+            'calinski_harabasz_score': calinski_harabasz,
+            'davies_bouldin_score': davies_bouldin,
+            'labels': cluster_labels
+        }
+        
+        logger.info(f"K={k}: Inertia={inertia:.2f}, Silhouette={silhouette_avg:.3f}")
+    
+    # Find optimal K using silhouette score
+    optimal_k = min_clusters + np.argmax(silhouette_scores)
+    logger.info(f"✓ Optimal K-Means clusters (by silhouette): {optimal_k}")
+    
+    clustering_results['algorithms']['kmeans'] = {
+        'results': kmeans_results,
+        'optimal_k': optimal_k,
+        'inertias': inertias,
+        'silhouette_scores': silhouette_scores
+    }
+    
+    # 2. DBSCAN clustering
+    logger.info("\n=== DBSCAN Clustering ===")
+    # Try different eps values
+    eps_values = [0.3, 0.5, 0.7, 1.0, 1.5]
+    dbscan_results = {}
+    
+    for eps in eps_values:
+        dbscan = DBSCAN(eps=eps, min_samples=5)
+        cluster_labels = dbscan.fit_predict(X_scaled)
+        
+        n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+        n_noise = list(cluster_labels).count(-1)
+        
+        if n_clusters > 1:
+            silhouette_avg = silhouette_score(X_scaled, cluster_labels)
+            calinski_harabasz = calinski_harabasz_score(X_scaled, cluster_labels)
+            davies_bouldin = davies_bouldin_score(X_scaled, cluster_labels)
+        else:
+            silhouette_avg = -1
+            calinski_harabasz = -1
+            davies_bouldin = float('inf')
+        
+        dbscan_results[eps] = {
+            'n_clusters': n_clusters,
+            'n_noise': n_noise,
+            'silhouette_score': silhouette_avg,
+            'calinski_harabasz_score': calinski_harabasz,
+            'davies_bouldin_score': davies_bouldin,
+            'labels': cluster_labels
+        }
+        
+        logger.info(f"eps={eps}: Clusters={n_clusters}, Noise={n_noise}, Silhouette={silhouette_avg:.3f}")
+    
+    # Find best DBSCAN parameters
+    valid_dbscan = {k: v for k, v in dbscan_results.items() if v['n_clusters'] > 1}
+    if valid_dbscan:
+        best_eps = max(valid_dbscan.keys(), key=lambda x: valid_dbscan[x]['silhouette_score'])
+        logger.info(f"✓ Best DBSCAN eps: {best_eps}")
+    else:
+        best_eps = None
+        logger.warning("⚠ No valid DBSCAN clustering found")
+    
+    clustering_results['algorithms']['dbscan'] = {
+        'results': dbscan_results,
+        'best_eps': best_eps
+    }
+    
+    # 3. Hierarchical clustering
+    logger.info("\n=== Hierarchical Clustering ===")
+    hierarchical_results = {}
+    
+    for k in range(min_clusters, min(max_clusters + 1, 8)):  # Limit for computational efficiency
+        hierarchical = AgglomerativeClustering(n_clusters=k, linkage='ward')
+        cluster_labels = hierarchical.fit_predict(X_scaled)
+        
+        # Calculate metrics
+        silhouette_avg = silhouette_score(X_scaled, cluster_labels)
+        calinski_harabasz = calinski_harabasz_score(X_scaled, cluster_labels)
+        davies_bouldin = davies_bouldin_score(X_scaled, cluster_labels)
+        
+        hierarchical_results[k] = {
+            'silhouette_score': silhouette_avg,
+            'calinski_harabasz_score': calinski_harabasz,
+            'davies_bouldin_score': davies_bouldin,
+            'labels': cluster_labels
+        }
+        
+        logger.info(f"K={k}: Silhouette={silhouette_avg:.3f}")
+    
+    # Find optimal hierarchical clustering
+    hierarchical_scores = [v['silhouette_score'] for v in hierarchical_results.values()]
+    optimal_hierarchical_k = min_clusters + np.argmax(hierarchical_scores)
+    logger.info(f"✓ Optimal Hierarchical clusters: {optimal_hierarchical_k}")
+    
+    clustering_results['algorithms']['hierarchical'] = {
+        'results': hierarchical_results,
+        'optimal_k': optimal_hierarchical_k
+    }
+    
+    # Summary
+    logger.info("\n=== Clustering Summary ===")
+    logger.info(f"K-Means optimal clusters: {optimal_k}")
+    if best_eps:
+        logger.info(f"DBSCAN optimal eps: {best_eps} ({dbscan_results[best_eps]['n_clusters']} clusters)")
+    logger.info(f"Hierarchical optimal clusters: {optimal_hierarchical_k}")
+    
+    # Save results if requested
+    if save_results:
+        results_dir = Path('data/clustering')
+        results_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save cluster assignments for best models
+        cluster_assignments = pd.DataFrame({
+            'sample_id': range(len(X)),
+            'kmeans_clusters': kmeans_results[optimal_k]['labels'],
+            'hierarchical_clusters': hierarchical_results[optimal_hierarchical_k]['labels']
+        })
+        
+        if best_eps:
+            cluster_assignments['dbscan_clusters'] = dbscan_results[best_eps]['labels']
+        
+        # Add original features and target if available
+        cluster_assignments = pd.concat([cluster_assignments, X.reset_index(drop=True)], axis=1)
+        if y is not None:
+            cluster_assignments[target_col] = y.reset_index(drop=True)
+        
+        assignments_path = results_dir / 'cluster_assignments.csv'
+        cluster_assignments.to_csv(assignments_path, index=False)
+        logger.info(f"✓ Cluster assignments saved: {assignments_path}")
+        
+        # Save clustering metrics
+        import json
+        metrics_path = results_dir / 'clustering_metrics.json'
+        
+        # Convert numpy arrays to lists for JSON serialization
+        results_for_json = clustering_results.copy()
+        for alg_name, alg_data in results_for_json['algorithms'].items():
+            if 'inertias' in alg_data:
+                alg_data['inertias'] = [float(x) for x in alg_data['inertias']]
+            if 'silhouette_scores' in alg_data:
+                alg_data['silhouette_scores'] = [float(x) for x in alg_data['silhouette_scores']]
+            
+            # Remove cluster labels from JSON (too large)
+            if 'results' in alg_data:
+                for k, v in alg_data['results'].items():
+                    if 'labels' in v:
+                        del v['labels']
+        
+        with open(metrics_path, 'w') as f:
+            json.dump(results_for_json, f, indent=2)
+        logger.info(f"✓ Clustering metrics saved: {metrics_path}")
+    
+    logger.info("✓ Clustering analysis completed")
+    return clustering_results
 
 
 def split_data(test_size: float = 0.2, 
@@ -372,8 +607,8 @@ def get_feature_names(data_path: Optional[Path] = None) -> List[str]:
         logger.warning(f"Data file not found: {data_path}")
         # Return default feature names based on expected structure
         return [
-            'id', 'pressure_MPa', 'mass_flux_kg_m2_s', 'x_e_out__',
-            'D_e_mm', 'D_h_mm', 'length_mm', 'geometry_encoded'
+            'pressure_MPa', 'mass_flux_kg_m2_s', 'x_e_out__',
+            'D_h_mm', 'length_mm', 'geometry_encoded'
         ]
     
     # Read just the header
@@ -398,13 +633,10 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     df_features = df.copy()
     
     # Example feature engineering
-    if 'D_h_mm' in df.columns and 'D_e_mm' in df.columns:
-        # Diameter ratio
-        df_features['diameter_ratio'] = df['D_h_mm'] / (df['D_e_mm'] + 1e-6)
-    
-    if 'length_mm' in df.columns and 'D_h_mm' in df.columns:
+    if 'D_h_mm' in df.columns:
         # Length to diameter ratio
-        df_features['L_D_ratio'] = df['length_mm'] / (df['D_h_mm'] + 1e-6)
+        if 'length_mm' in df.columns:
+            df_features['L_D_ratio'] = df['length_mm'] / (df['D_h_mm'] + 1e-6)
     
     if 'mass_flux_kg_m2_s' in df.columns and 'pressure_MPa' in df.columns:
         # Flow intensity metric
@@ -426,6 +658,7 @@ __all__ = [
     'split_data',
     'get_feature_names',
     'create_features',
+    'perform_clustering',
     'create_eda_plots',
     'check_data_quality',
     'load_data_with_validation'
