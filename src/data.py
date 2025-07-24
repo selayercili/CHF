@@ -738,13 +738,13 @@ def split_data(test_size: float = 0.2,
     return train_path, test_path
 
 
-def apply_cluster_aware_smote(X, y, cluster_labels, sampling_strategy='auto', random_state=42):
+def apply_cluster_aware_smote_regression(X, y, cluster_labels, sampling_strategy='auto', random_state=42):
     """
-    Apply SMOTE within each cluster separately for better synthetic sample generation.
+    Apply SMOTE for regression within each cluster using SMOTEN or alternative approaches.
     
     Args:
-        X: Feature matrix
-        y: Target values (will be binned for SMOTE)
+        X: Feature matrix (numpy array or pandas DataFrame)
+        y: Target values (continuous)
         cluster_labels: Cluster assignments
         sampling_strategy: SMOTE sampling strategy
         random_state: Random seed
@@ -753,21 +753,42 @@ def apply_cluster_aware_smote(X, y, cluster_labels, sampling_strategy='auto', ra
         Tuple of (X_resampled, y_resampled, cluster_labels_resampled)
     """
     try:
-        from imblearn.over_sampling import SMOTE
+        from imblearn.over_sampling import SMOTEN, BorderlineSMOTE
         from sklearn.preprocessing import KBinsDiscretizer
+        import numpy as np
+        import pandas as pd
     except ImportError:
         raise ImportError("Install imbalanced-learn: pip install imbalanced-learn")
     
-    logger.info("Applying cluster-aware SMOTE...")
+    logger.info("Applying cluster-aware SMOTE for regression...")
     
-    # Convert continuous target to discrete classes for SMOTE
-    # Use quantile-based binning
-    n_bins = min(10, len(np.unique(y)))  # Max 10 bins, less if few unique values
+    # Convert to numpy arrays if pandas DataFrames
+    if isinstance(X, pd.DataFrame):
+        X_array = X.values
+        feature_names = X.columns.tolist()
+    else:
+        X_array = X
+        feature_names = [f"feature_{i}" for i in range(X.shape[1])]
+    
+    if isinstance(y, pd.Series):
+        y_array = y.values
+    else:
+        y_array = y
+    
+    if isinstance(cluster_labels, pd.Series):
+        cluster_labels_array = cluster_labels.values
+    else:
+        cluster_labels_array = cluster_labels
+    
+    # Strategy 1: Use quantile-based binning but preserve more target information
+    n_bins = min(20, len(np.unique(y_array)) // 2)  # More bins for better granularity
+    n_bins = max(3, n_bins)  # At least 3 bins
+    
     discretizer = KBinsDiscretizer(n_bins=n_bins, encode='ordinal', strategy='quantile')
-    y_binned = discretizer.fit_transform(y.values.reshape(-1, 1)).ravel().astype(int)
+    y_binned = discretizer.fit_transform(y_array.reshape(-1, 1)).ravel().astype(int)
     
-    logger.info(f"✓ Binned continuous target into {n_bins} classes")
-    logger.info(f"  Original target range: {y.min():.3f} to {y.max():.3f}")
+    logger.info(f"✓ Binned continuous target into {n_bins} classes for SMOTE")
+    logger.info(f"  Original target range: {y_array.min():.3f} to {y_array.max():.3f}")
     
     # Store results
     X_resampled_list = []
@@ -775,44 +796,95 @@ def apply_cluster_aware_smote(X, y, cluster_labels, sampling_strategy='auto', ra
     cluster_resampled_list = []
     
     # Apply SMOTE within each cluster
-    for cluster_id in sorted(cluster_labels.unique()):
-        cluster_mask = cluster_labels == cluster_id
-        X_cluster = X[cluster_mask]
+    for cluster_id in sorted(np.unique(cluster_labels_array)):
+        cluster_mask = cluster_labels_array == cluster_id
+        X_cluster = X_array[cluster_mask]
         y_cluster_binned = y_binned[cluster_mask]
-        y_cluster_original = y[cluster_mask]
+        y_cluster_original = y_array[cluster_mask]
         
         logger.info(f"\n🎯 Processing Cluster {cluster_id}:")
         logger.info(f"  Original samples: {len(X_cluster)}")
         
-        # Check if cluster has enough diversity for SMOTE
-        unique_classes = np.unique(y_cluster_binned)
-        if len(unique_classes) < 2:
-            logger.warning(f"  ⚠️ Cluster {cluster_id} has only 1 class, skipping SMOTE")
+        # Check class distribution in cluster
+        unique_classes, class_counts = np.unique(y_cluster_binned, return_counts=True)
+        min_class_size = min(class_counts) if len(class_counts) > 0 else 0
+        
+        logger.info(f"  Classes in cluster: {len(unique_classes)}")
+        logger.info(f"  Min class size: {min_class_size}")
+        
+        # Skip clusters with insufficient diversity
+        if len(unique_classes) < 2 or min_class_size < 2:
+            logger.warning(f"  ⚠️ Cluster {cluster_id} has insufficient diversity for SMOTE")
             X_resampled_list.append(X_cluster)
             y_resampled_list.append(y_cluster_original)
             cluster_resampled_list.append(np.full(len(X_cluster), cluster_id))
             continue
         
-        # Apply SMOTE to this cluster
+        # Apply SMOTE with error handling
         try:
-            smote = SMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
-            X_cluster_resampled, y_cluster_binned_resampled = smote.fit_resample(X_cluster, y_cluster_binned)
+            # Try BorderlineSMOTE first (often better for regression-like problems)
+            try:
+                smote = BorderlineSMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
+                X_cluster_resampled, y_cluster_binned_resampled = smote.fit_resample(X_cluster, y_cluster_binned)
+                smote_method = "BorderlineSMOTE"
+            except:
+                # Fallback to regular SMOTE
+                from imblearn.over_sampling import SMOTE
+                smote = SMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
+                X_cluster_resampled, y_cluster_binned_resampled = smote.fit_resample(X_cluster, y_cluster_binned)
+                smote_method = "SMOTE"
             
-            # Map back to original continuous values using cluster statistics
-            y_cluster_mean = y_cluster_original.mean()
-            y_cluster_std = y_cluster_original.std()
+            # Generate synthetic continuous targets using improved method
+            n_original = len(X_cluster)
+            n_synthetic = len(X_cluster_resampled) - n_original
             
-            # Generate synthetic continuous targets with same distribution
-            n_synthetic = len(X_cluster_resampled) - len(X_cluster)
-            synthetic_targets = np.random.normal(y_cluster_mean, y_cluster_std, n_synthetic)
+            if n_synthetic > 0:
+                # Method 1: Use class-aware target generation
+                synthetic_targets = []
+                
+                # Get the synthetic samples and their classes
+                synthetic_classes = y_cluster_binned_resampled[n_original:]
+                
+                for synthetic_class in synthetic_classes:
+                    # Find original samples in the same class
+                    class_mask = y_cluster_binned == synthetic_class
+                    class_targets = y_cluster_original[class_mask]
+                    
+                    if len(class_targets) > 1:
+                        # Sample from the class distribution with some noise
+                        class_mean = np.mean(class_targets)
+                        class_std = np.std(class_targets)
+                        # Add some noise but keep within reasonable bounds
+                        noise_factor = 0.1  # 10% noise
+                        synthetic_target = np.random.normal(
+                            class_mean, 
+                            max(class_std * noise_factor, class_std * 0.05)  # At least 5% of std
+                        )
+                        # Clip to reasonable range based on class bounds
+                        min_class_val = np.min(class_targets)
+                        max_class_val = np.max(class_targets)
+                        range_extension = (max_class_val - min_class_val) * 0.1  # Allow 10% extension
+                        synthetic_target = np.clip(
+                            synthetic_target,
+                            min_class_val - range_extension,
+                            max_class_val + range_extension
+                        )
+                    else:
+                        # Single sample in class, use it directly with small noise
+                        base_value = class_targets[0]
+                        noise = np.random.normal(0, abs(base_value) * 0.05)  # 5% relative noise
+                        synthetic_target = base_value + noise
+                    
+                    synthetic_targets.append(synthetic_target)
+                
+                synthetic_targets = np.array(synthetic_targets)
+                
+                # Combine original and synthetic targets
+                y_cluster_resampled = np.concatenate([y_cluster_original, synthetic_targets])
+            else:
+                y_cluster_resampled = y_cluster_original
             
-            # Combine original and synthetic targets
-            y_cluster_resampled = np.concatenate([
-                y_cluster_original.values,
-                synthetic_targets
-            ])
-            
-            logger.info(f"  ✓ SMOTE applied: {len(X_cluster)} → {len(X_cluster_resampled)} samples")
+            logger.info(f"  ✓ {smote_method} applied: {len(X_cluster)} → {len(X_cluster_resampled)} samples")
             logger.info(f"    Added {n_synthetic} synthetic samples")
             
             X_resampled_list.append(X_cluster_resampled)
@@ -827,14 +899,28 @@ def apply_cluster_aware_smote(X, y, cluster_labels, sampling_strategy='auto', ra
             cluster_resampled_list.append(np.full(len(X_cluster), cluster_id))
     
     # Combine all clusters
-    X_resampled = np.vstack(X_resampled_list)
-    y_resampled = np.concatenate(y_resampled_list)
-    cluster_labels_resampled = np.concatenate(cluster_resampled_list)
+    if X_resampled_list:
+        X_resampled = np.vstack(X_resampled_list)
+        y_resampled = np.concatenate(y_resampled_list)
+        cluster_labels_resampled = np.concatenate(cluster_resampled_list)
+    else:
+        # Fallback if no clusters processed
+        X_resampled = X_array
+        y_resampled = y_array
+        cluster_labels_resampled = cluster_labels_array
     
     logger.info(f"\n✅ Cluster-aware SMOTE completed:")
-    logger.info(f"  Original data: {X.shape[0]} samples")
+    logger.info(f"  Original data: {X_array.shape[0]} samples")
     logger.info(f"  Resampled data: {X_resampled.shape[0]} samples")
-    logger.info(f"  Synthetic samples added: {X_resampled.shape[0] - X.shape[0]}")
+    logger.info(f"  Synthetic samples added: {X_resampled.shape[0] - X_array.shape[0]}")
+    
+    # Convert back to original format if needed
+    if isinstance(X, pd.DataFrame):
+        X_resampled = pd.DataFrame(X_resampled, columns=feature_names)
+    if isinstance(y, pd.Series):
+        y_resampled = pd.Series(y_resampled, name=y.name)
+    if isinstance(cluster_labels, pd.Series):
+        cluster_labels_resampled = pd.Series(cluster_labels_resampled, name=cluster_labels.name)
     
     return X_resampled, y_resampled, cluster_labels_resampled
 
