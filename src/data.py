@@ -14,7 +14,7 @@ import os
 import shutil
 import stat
 from pathlib import Path
-from typing import Tuple, Optional, Dict, List, Any
+from typing import Tuple, Optional, Dict, List, Any, Union
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -22,6 +22,7 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 import logging
+
 
 # Try to import kagglehub
 try:
@@ -35,7 +36,7 @@ from src.utils.data_utils import check_data_quality, load_data_with_validation
 
 logger = get_logger(__name__)
 
-
+# DATA DOWNLOAD AND PREPROCESS --------------
 def secure_kaggle_json() -> None:
     """Set restricted permissions on kaggle.json (Windows compatible)."""
     kaggle_dir = os.path.expanduser('~/.kaggle')
@@ -52,7 +53,6 @@ def secure_kaggle_json() -> None:
             "kaggle.json not found. Please create ~/.kaggle/kaggle.json with:\n"
             '{"username":"YOUR_USERNAME","key":"YOUR_API_KEY"}'
         )
-
 
 
 def download_dataset(force_download: bool = False) -> bool:
@@ -266,7 +266,7 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
     
     return df_processed
 
-
+# CLUSTERING ------------------
 def perform_clustering(data_path: Optional[Path] = None, 
                       n_clusters_range: Tuple[int, int] = (2, 10),
                       save_results: bool = True) -> Dict[str, Any]:
@@ -596,54 +596,6 @@ def apply_selected_clustering(algorithm='kmeans', data_path=None, save_to_origin
     return train_df_with_clusters
 
 
-def prepare_data_for_smote(algorithm='kmeans', target_column=None):
-    """
-    Prepare data for SMOTE by adding cluster-aware sampling.
-    
-    Args:
-        algorithm: Clustering algorithm to use
-        target_column: Name of target column (auto-detected if None)
-        
-    Returns:
-        Tuple of (X, y, cluster_labels) ready for SMOTE
-    """
-    logger.info("Preparing data for SMOTE with cluster awareness...")
-    
-    # Apply clustering
-    train_df_clustered = apply_selected_clustering(algorithm=algorithm, save_to_original=False)
-    
-    # Identify target column
-    if target_column is None:
-        target_columns = [col for col in train_df_clustered.columns if 'chf_exp' in col.lower()]
-        if target_columns:
-            target_column = target_columns[0]
-        else:
-            raise ValueError("Could not identify target column. Please specify target_column parameter.")
-    
-    # Separate features, target, and clusters
-    cluster_labels = train_df_clustered['cluster_label']
-    X = train_df_clustered.drop([target_column, 'cluster_label'], axis=1)
-    y = train_df_clustered[target_column]
-    
-    logger.info(f"✓ Prepared data for SMOTE:")
-    logger.info(f"  Features: {X.shape}")
-    logger.info(f"  Target: {y.shape}")
-    logger.info(f"  Clusters: {len(cluster_labels.unique())} unique clusters")
-    
-    # Show cluster-target relationship
-    logger.info("\n📊 Cluster-Target Analysis:")
-    for cluster_id in sorted(cluster_labels.unique()):
-        cluster_mask = cluster_labels == cluster_id
-        cluster_target_mean = y[cluster_mask].mean()
-        cluster_target_std = y[cluster_mask].std()
-        cluster_size = cluster_mask.sum()
-        
-        logger.info(f"  Cluster {cluster_id}: {cluster_size} samples, "
-                   f"target mean={cluster_target_mean:.3f} ±{cluster_target_std:.3f}")
-    
-    return X, y, cluster_labels
-
-
 def split_data(test_size: float = 0.2, 
                random_state: int = 42,
                stratify: bool = False) -> Tuple[Path, Path]:
@@ -736,6 +688,54 @@ def split_data(test_size: float = 0.2,
         logger.warning(f"⚠ Data quality issues: {quality_report['issues']}")
     
     return train_path, test_path
+
+# APPLY SMOTE ------------------
+def prepare_data_for_smote(algorithm='kmeans', target_column=None):
+    """
+    Prepare data for SMOTE by adding cluster-aware sampling.
+    
+    Args:
+        algorithm: Clustering algorithm to use
+        target_column: Name of target column (auto-detected if None)
+        
+    Returns:
+        Tuple of (X, y, cluster_labels) ready for SMOTE
+    """
+    logger.info("Preparing data for SMOTE with cluster awareness...")
+    
+    # Apply clustering
+    train_df_clustered = apply_selected_clustering(algorithm=algorithm, save_to_original=False)
+    
+    # Identify target column
+    if target_column is None:
+        target_columns = [col for col in train_df_clustered.columns if 'chf_exp' in col.lower()]
+        if target_columns:
+            target_column = target_columns[0]
+        else:
+            raise ValueError("Could not identify target column. Please specify target_column parameter.")
+    
+    # Separate features, target, and clusters
+    cluster_labels = train_df_clustered['cluster_label']
+    X = train_df_clustered.drop([target_column, 'cluster_label'], axis=1)
+    y = train_df_clustered[target_column]
+    
+    logger.info(f"✓ Prepared data for SMOTE:")
+    logger.info(f"  Features: {X.shape}")
+    logger.info(f"  Target: {y.shape}")
+    logger.info(f"  Clusters: {len(cluster_labels.unique())} unique clusters")
+    
+    # Show cluster-target relationship
+    logger.info("\n📊 Cluster-Target Analysis:")
+    for cluster_id in sorted(cluster_labels.unique()):
+        cluster_mask = cluster_labels == cluster_id
+        cluster_target_mean = y[cluster_mask].mean()
+        cluster_target_std = y[cluster_mask].std()
+        cluster_size = cluster_mask.sum()
+        
+        logger.info(f"  Cluster {cluster_id}: {cluster_size} samples, "
+                   f"target mean={cluster_target_mean:.3f} ±{cluster_target_std:.3f}")
+    
+    return X, y, cluster_labels
 
 
 def apply_cluster_aware_smote_regression(X, y, cluster_labels, sampling_strategy='auto', random_state=42):
@@ -923,6 +923,151 @@ def apply_cluster_aware_smote_regression(X, y, cluster_labels, sampling_strategy
         cluster_labels_resampled = pd.Series(cluster_labels_resampled, name=cluster_labels.name)
     
     return X_resampled, y_resampled, cluster_labels_resampled
+
+
+def _apply_cluster_aware_smote(
+    X: Union[pd.DataFrame, np.ndarray],
+    y: Union[pd.Series, np.ndarray],
+    clusters: Union[pd.Series, np.ndarray],
+    random_state: int = 42,
+    n_jobs: int = -1
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Internal function to apply SMOTE within each cluster.
+    
+    Args:
+        X: Feature matrix
+        y: Target values
+        clusters: Cluster assignments
+        random_state: Random seed
+        n_jobs: Number of CPU cores to use
+        
+    Returns:
+        Tuple of (X_resampled, y_resampled)
+    """
+    try:
+        from imblearn.over_sampling import SMOTENC
+        from sklearn.preprocessing import KBinsDiscretizer
+    except ImportError:
+        logger.error("SMOTE requires imbalanced-learn. Install with: pip install imbalanced-learn")
+        raise
+    
+    # Convert to numpy if pandas objects
+    if isinstance(X, pd.DataFrame):
+        X = X.values
+    if isinstance(y, pd.Series):
+        y = y.values
+    if isinstance(clusters, pd.Series):
+        clusters = clusters.values
+    
+    # Discretize target for SMOTE (required for regression)
+    n_bins = max(3, min(20, len(np.unique(y)) // 2))
+    discretizer = KBinsDiscretizer(n_bins=n_bins, encode='ordinal', strategy='quantile')
+    y_binned = discretizer.fit_transform(y.reshape(-1, 1)).ravel().astype(int)
+    
+    # Combine clusters with features (SMOTENC needs to know categorical features)
+    # We treat cluster labels as categorical
+    X_with_clusters = np.column_stack([X, clusters])
+    categorical_features = [X.shape[1]]  # Index of cluster column
+    
+    # Apply SMOTENC (SMOTE for Numerical and Categorical)
+    smote = SMOTENC(
+        categorical_features=categorical_features,
+        sampling_strategy='auto',
+        random_state=random_state,
+        n_jobs=n_jobs
+    )
+    
+    X_resampled, y_binned_resampled = smote.fit_resample(X_with_clusters, y_binned)
+    
+    # Convert back to original continuous target values
+    # For synthetic samples, we use the median of their bin
+    y_resampled = np.zeros_like(y_binned_resampled, dtype=float)
+    
+    for bin_idx in np.unique(y_binned):
+        # Original samples in this bin
+        original_mask = (y_binned == bin_idx)
+        original_values = y[original_mask]
+        
+        # Synthetic samples in this bin
+        synthetic_mask = (y_binned_resampled == bin_idx) & (np.arange(len(y_binned_resampled)) >= len(y))
+        y_resampled[synthetic_mask] = np.median(original_values)
+        
+        # Keep original values for non-synthetic samples
+        original_resampled_mask = (y_binned_resampled == bin_idx) & (np.arange(len(y_binned_resampled)) < len(y))
+        y_resampled[original_resampled_mask] = y[original_mask]
+    
+    # Remove cluster column from features
+    X_resampled = X_resampled[:, :-1]
+    
+    logger.info(
+        f"Applied cluster-aware SMOTE: {len(X)} → {len(X_resampled)} samples "
+        f"(added {len(X_resampled)-len(X)} synthetic samples)"
+    )
+    
+    return X_resampled, y_resampled
+
+
+def apply_smote_to_train_data(
+    algorithm: str = 'kmeans',
+    test_size: float = 0.2,
+    random_state: int = 42,
+    n_jobs: int = -1
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Apply cluster-aware SMOTE to the training data.
+    
+    Args:
+        algorithm: Clustering algorithm used ('kmeans', 'hierarchical', 'dbscan')
+        test_size: Size of test set (only used if need to recreate splits)
+        random_state: Random seed for reproducibility
+        n_jobs: Number of CPU cores to use (-1 for all)
+        
+    Returns:
+        Tuple of (resampled_train_df, original_test_df)
+    """
+    # Load the clustered training data
+    train_path = Path('data/processed/train_with_clusters.csv')
+    test_path = Path('data/processed/test.csv')
+    
+    if not train_path.exists():
+        logger.warning("train_with_clusters.csv not found, creating new split...")
+        split_data(test_size=test_size, random_state=random_state)
+        train_path = Path('data/processed/train.csv')  # Fall back to non-clustered version
+    
+    try:
+        train_df = pd.read_csv(train_path)
+        test_df = pd.read_csv(test_path)
+    except Exception as e:
+        logger.error(f"Failed to load train/test data: {e}")
+        raise
+    
+    # Identify target column
+    target_col = [col for col in train_df.columns if 'chf_exp' in col.lower()][0]
+    
+    # Prepare data for SMOTE
+    X = train_df.drop(columns=[target_col, 'cluster_label'])
+    y = train_df[target_col]
+    clusters = train_df['cluster_label']
+    
+    # Apply SMOTE
+    X_resampled, y_resampled = _apply_cluster_aware_smote(
+        X, y, clusters,
+        random_state=random_state,
+        n_jobs=n_jobs
+    )
+    
+    # Combine back into DataFrame
+    resampled_train_df = pd.DataFrame(X_resampled, columns=X.columns)
+    resampled_train_df[target_col] = y_resampled
+    resampled_train_df['cluster_label'] = clusters  # Keep original cluster labels
+    
+    # Save the resampled data
+    resampled_path = Path('data/processed/train_resampled.csv')
+    resampled_train_df.to_csv(resampled_path, index=False)
+    logger.info(f"✓ SMOTE-applied training data saved to {resampled_path}")
+    
+    return resampled_train_df, test_df
 
 
 def get_feature_names(data_path: Optional[Path] = None) -> List[str]:
