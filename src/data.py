@@ -54,6 +54,7 @@ def secure_kaggle_json() -> None:
         )
 
 
+
 def download_dataset(force_download: bool = False) -> bool:
     """
     Download the CHF dataset from Kaggle.
@@ -531,6 +532,118 @@ def perform_clustering(data_path: Optional[Path] = None,
     return clustering_results
 
 
+def apply_selected_clustering(algorithm='kmeans', data_path=None, save_to_original=True):
+    """
+    Apply the selected clustering algorithm and add cluster labels to training data.
+    
+    Args:
+        algorithm: 'kmeans', 'hierarchical', or 'dbscan'
+        data_path: Path to training data (defaults to train.csv)
+        save_to_original: Whether to save cluster labels back to original train.csv
+        
+    Returns:
+        DataFrame with cluster labels added
+    """
+    logger.info(f"Applying {algorithm} clustering to training data...")
+    
+    # Setup paths
+    if data_path is None:
+        data_path = Path('data/processed/train.csv')
+    
+    clustering_dir = Path('data/clustering')
+    cluster_assignments_path = clustering_dir / 'cluster_assignments.csv'
+    
+    if not cluster_assignments_path.exists():
+        raise FileNotFoundError(f"Cluster assignments not found. Run perform_clustering() first.")
+    
+    # Load original training data and cluster assignments
+    train_df = pd.read_csv(data_path)
+    cluster_df = pd.read_csv(cluster_assignments_path)
+    
+    # Select the appropriate cluster column
+    cluster_column_map = {
+        'kmeans': 'kmeans_clusters',
+        'hierarchical': 'hierarchical_clusters', 
+        'dbscan': 'dbscan_clusters'
+    }
+    
+    if algorithm not in cluster_column_map:
+        raise ValueError(f"Algorithm must be one of: {list(cluster_column_map.keys())}")
+    
+    cluster_col = cluster_column_map[algorithm]
+    
+    if cluster_col not in cluster_df.columns:
+        raise ValueError(f"Cluster column '{cluster_col}' not found in cluster assignments")
+    
+    # Add cluster labels to training data
+    train_df_with_clusters = train_df.copy()
+    train_df_with_clusters['cluster_label'] = cluster_df[cluster_col].values
+    
+    logger.info(f"✓ Added {algorithm} cluster labels to training data")
+    logger.info(f"  Cluster distribution: {dict(pd.Series(cluster_df[cluster_col]).value_counts().sort_index())}")
+    
+    # Save back to original file if requested
+    if save_to_original:
+        # Create backup first
+        backup_path = data_path.parent / f"{data_path.stem}_backup.csv"
+        train_df.to_csv(backup_path, index=False)
+        logger.info(f"✓ Created backup: {backup_path}")
+        
+        # Save with cluster labels
+        train_df_with_clusters.to_csv(data_path, index=False)
+        logger.info(f"✓ Updated training data with cluster labels: {data_path}")
+    
+    return train_df_with_clusters
+
+
+def prepare_data_for_smote(algorithm='kmeans', target_column=None):
+    """
+    Prepare data for SMOTE by adding cluster-aware sampling.
+    
+    Args:
+        algorithm: Clustering algorithm to use
+        target_column: Name of target column (auto-detected if None)
+        
+    Returns:
+        Tuple of (X, y, cluster_labels) ready for SMOTE
+    """
+    logger.info("Preparing data for SMOTE with cluster awareness...")
+    
+    # Apply clustering
+    train_df_clustered = apply_selected_clustering(algorithm=algorithm, save_to_original=False)
+    
+    # Identify target column
+    if target_column is None:
+        target_columns = [col for col in train_df_clustered.columns if 'chf_exp' in col.lower()]
+        if target_columns:
+            target_column = target_columns[0]
+        else:
+            raise ValueError("Could not identify target column. Please specify target_column parameter.")
+    
+    # Separate features, target, and clusters
+    cluster_labels = train_df_clustered['cluster_label']
+    X = train_df_clustered.drop([target_column, 'cluster_label'], axis=1)
+    y = train_df_clustered[target_column]
+    
+    logger.info(f"✓ Prepared data for SMOTE:")
+    logger.info(f"  Features: {X.shape}")
+    logger.info(f"  Target: {y.shape}")
+    logger.info(f"  Clusters: {len(cluster_labels.unique())} unique clusters")
+    
+    # Show cluster-target relationship
+    logger.info("\n📊 Cluster-Target Analysis:")
+    for cluster_id in sorted(cluster_labels.unique()):
+        cluster_mask = cluster_labels == cluster_id
+        cluster_target_mean = y[cluster_mask].mean()
+        cluster_target_std = y[cluster_mask].std()
+        cluster_size = cluster_mask.sum()
+        
+        logger.info(f"  Cluster {cluster_id}: {cluster_size} samples, "
+                   f"target mean={cluster_target_mean:.3f} ±{cluster_target_std:.3f}")
+    
+    return X, y, cluster_labels
+
+
 def split_data(test_size: float = 0.2, 
                random_state: int = 42,
                stratify: bool = False) -> Tuple[Path, Path]:
@@ -625,6 +738,107 @@ def split_data(test_size: float = 0.2,
     return train_path, test_path
 
 
+def apply_cluster_aware_smote(X, y, cluster_labels, sampling_strategy='auto', random_state=42):
+    """
+    Apply SMOTE within each cluster separately for better synthetic sample generation.
+    
+    Args:
+        X: Feature matrix
+        y: Target values (will be binned for SMOTE)
+        cluster_labels: Cluster assignments
+        sampling_strategy: SMOTE sampling strategy
+        random_state: Random seed
+        
+    Returns:
+        Tuple of (X_resampled, y_resampled, cluster_labels_resampled)
+    """
+    try:
+        from imblearn.over_sampling import SMOTE
+        from sklearn.preprocessing import KBinsDiscretizer
+    except ImportError:
+        raise ImportError("Install imbalanced-learn: pip install imbalanced-learn")
+    
+    logger.info("Applying cluster-aware SMOTE...")
+    
+    # Convert continuous target to discrete classes for SMOTE
+    # Use quantile-based binning
+    n_bins = min(10, len(np.unique(y)))  # Max 10 bins, less if few unique values
+    discretizer = KBinsDiscretizer(n_bins=n_bins, encode='ordinal', strategy='quantile')
+    y_binned = discretizer.fit_transform(y.values.reshape(-1, 1)).ravel().astype(int)
+    
+    logger.info(f"✓ Binned continuous target into {n_bins} classes")
+    logger.info(f"  Original target range: {y.min():.3f} to {y.max():.3f}")
+    
+    # Store results
+    X_resampled_list = []
+    y_resampled_list = []
+    cluster_resampled_list = []
+    
+    # Apply SMOTE within each cluster
+    for cluster_id in sorted(cluster_labels.unique()):
+        cluster_mask = cluster_labels == cluster_id
+        X_cluster = X[cluster_mask]
+        y_cluster_binned = y_binned[cluster_mask]
+        y_cluster_original = y[cluster_mask]
+        
+        logger.info(f"\n🎯 Processing Cluster {cluster_id}:")
+        logger.info(f"  Original samples: {len(X_cluster)}")
+        
+        # Check if cluster has enough diversity for SMOTE
+        unique_classes = np.unique(y_cluster_binned)
+        if len(unique_classes) < 2:
+            logger.warning(f"  ⚠️ Cluster {cluster_id} has only 1 class, skipping SMOTE")
+            X_resampled_list.append(X_cluster)
+            y_resampled_list.append(y_cluster_original)
+            cluster_resampled_list.append(np.full(len(X_cluster), cluster_id))
+            continue
+        
+        # Apply SMOTE to this cluster
+        try:
+            smote = SMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
+            X_cluster_resampled, y_cluster_binned_resampled = smote.fit_resample(X_cluster, y_cluster_binned)
+            
+            # Map back to original continuous values using cluster statistics
+            y_cluster_mean = y_cluster_original.mean()
+            y_cluster_std = y_cluster_original.std()
+            
+            # Generate synthetic continuous targets with same distribution
+            n_synthetic = len(X_cluster_resampled) - len(X_cluster)
+            synthetic_targets = np.random.normal(y_cluster_mean, y_cluster_std, n_synthetic)
+            
+            # Combine original and synthetic targets
+            y_cluster_resampled = np.concatenate([
+                y_cluster_original.values,
+                synthetic_targets
+            ])
+            
+            logger.info(f"  ✓ SMOTE applied: {len(X_cluster)} → {len(X_cluster_resampled)} samples")
+            logger.info(f"    Added {n_synthetic} synthetic samples")
+            
+            X_resampled_list.append(X_cluster_resampled)
+            y_resampled_list.append(y_cluster_resampled)
+            cluster_resampled_list.append(np.full(len(X_cluster_resampled), cluster_id))
+            
+        except Exception as e:
+            logger.warning(f"  ⚠️ SMOTE failed for cluster {cluster_id}: {e}")
+            logger.warning(f"    Using original data for this cluster")
+            X_resampled_list.append(X_cluster)
+            y_resampled_list.append(y_cluster_original)
+            cluster_resampled_list.append(np.full(len(X_cluster), cluster_id))
+    
+    # Combine all clusters
+    X_resampled = np.vstack(X_resampled_list)
+    y_resampled = np.concatenate(y_resampled_list)
+    cluster_labels_resampled = np.concatenate(cluster_resampled_list)
+    
+    logger.info(f"\n✅ Cluster-aware SMOTE completed:")
+    logger.info(f"  Original data: {X.shape[0]} samples")
+    logger.info(f"  Resampled data: {X_resampled.shape[0]} samples")
+    logger.info(f"  Synthetic samples added: {X_resampled.shape[0] - X.shape[0]}")
+    
+    return X_resampled, y_resampled, cluster_labels_resampled
+
+
 def get_feature_names(data_path: Optional[Path] = None) -> List[str]:
     """
     Get feature names from processed data.
@@ -697,4 +911,7 @@ __all__ = [
     'create_eda_plots',
     'check_data_quality',
     'load_data_with_validation'
+    'apply_selected_clustering',       
+    'prepare_data_for_smote',          
+    'apply_cluster_aware_smote',     
 ]

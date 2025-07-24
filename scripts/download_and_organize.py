@@ -9,7 +9,8 @@ This script handles the complete data pipeline:
 3. Preprocesses data (encoding, scaling)
 4. Creates EDA plots
 5. Performs clustering analysis
-6. Saves processed data
+6. Applies selected clustering method for SMOTE preparation
+7. Saves processed data
 
 Usage:
     python scripts/download_and_organize.py [--force-download] [--test-size TEST_SIZE]
@@ -25,7 +26,10 @@ sys.path.append(str(project_root))
 
 # Imports after path setup
 from src.utils import setup_logging, get_logger
-from src.data import download_dataset, split_data, create_eda_plots, check_data_quality, perform_clustering
+from src.data import (
+    download_dataset, split_data, create_eda_plots, check_data_quality, 
+    perform_clustering, apply_selected_clustering, prepare_data_for_smote
+)
 from src.utils.data_utils import save_data_splits
 
 
@@ -50,6 +54,9 @@ Examples:
   
   # Skip clustering
   python scripts/download_and_organize.py --skip-clustering
+  
+  # Use different clustering algorithm for SMOTE
+  python scripts/download_and_organize.py --clustering-algorithm hierarchical
         """
     )
     
@@ -76,6 +83,14 @@ Examples:
         '--skip-clustering',
         action='store_true',
         help='Skip clustering analysis step'
+    )
+    
+    parser.add_argument(
+        '--clustering-algorithm',
+        type=str,
+        choices=['kmeans', 'hierarchical', 'dbscan'],
+        default='kmeans',
+        help='Clustering algorithm to use for SMOTE preparation (default: kmeans)'
     )
     
     parser.add_argument(
@@ -147,6 +162,7 @@ Examples:
         logger.info("\n=== Step 4: Skipping Visualization ===")
     
     # Step 5: Clustering analysis
+    clustering_completed = False
     if not args.skip_clustering:
         logger.info("\n=== Step 5: Clustering Analysis ===")
         try:
@@ -170,11 +186,45 @@ Examples:
             else:
                 logger.info("  - DBSCAN: No valid clustering found")
             
+            clustering_completed = True
+            
         except Exception as e:
             logger.error(f"Clustering analysis failed: {str(e)}")
             # Don't exit - clustering is optional
     else:
         logger.info("\n=== Step 5: Skipping Clustering Analysis ===")
+    
+    # Step 6: Apply selected clustering for SMOTE preparation
+    if clustering_completed:
+        logger.info(f"\n=== Step 6: Applying {args.clustering_algorithm.upper()} Clustering for SMOTE ===")
+        try:
+            # Apply the selected clustering method
+            train_df_with_clusters = apply_selected_clustering(
+                algorithm=args.clustering_algorithm,
+                data_path=train_path,
+                save_to_original=True
+            )
+            
+            logger.info(f"✓ Applied {args.clustering_algorithm} clustering to training data")
+            
+            # Prepare data for SMOTE (this validates the preparation without actually applying SMOTE)
+            X, y, cluster_labels = prepare_data_for_smote(algorithm=args.clustering_algorithm)
+            
+            logger.info("✓ Data prepared for SMOTE successfully")
+            logger.info(f"  - Features shape: {X.shape}")
+            logger.info(f"  - Target shape: {y.shape}")
+            logger.info(f"  - Number of clusters: {len(cluster_labels.unique())}")
+            
+            # Save cluster-aware training data path for future reference
+            cluster_aware_path = train_path.parent / 'train_with_clusters.csv'
+            train_df_with_clusters.to_csv(cluster_aware_path, index=False)
+            logger.info(f"✓ Cluster-aware training data saved: {cluster_aware_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to apply clustering for SMOTE: {str(e)}")
+            logger.warning("SMOTE preparation failed, but main pipeline continues...")
+    else:
+        logger.info("\n=== Step 6: Skipping SMOTE Preparation (no clustering) ===")
     
     # Summary
     logger.info("\n" + "="*60)
@@ -185,11 +235,33 @@ Examples:
     logger.info("✓ Data preprocessed and encoded")
     if not args.skip_viz:
         logger.info("✓ EDA plots generated")
-    if not args.skip_clustering:
+    if clustering_completed:
         logger.info("✓ Clustering analysis performed")
+        logger.info(f"✓ {args.clustering_algorithm.upper()} clustering applied for SMOTE")
+        logger.info("✓ Data prepared for cluster-aware SMOTE")
+    
+    # Final recommendations
+    logger.info("\n" + "="*50)
+    logger.info("Next Steps")
+    logger.info("="*50)
+    if clustering_completed:
+        logger.info("🎯 Your data is ready for cluster-aware SMOTE!")
+        logger.info("📁 Files available:")
+        logger.info(f"   • Training data: {train_path}")
+        logger.info(f"   • Training with clusters: {train_path.parent / 'train_with_clusters.csv'}")
+        logger.info(f"   • Test data: {test_path}")
+        logger.info(f"   • Cluster assignments: data/clustering/cluster_assignments.csv")
+        logger.info("")
+        logger.info("🚀 To use cluster-aware SMOTE in your model:")
+        logger.info("   from src.data import prepare_data_for_smote, apply_cluster_aware_smote")
+        logger.info(f"   X, y, clusters = prepare_data_for_smote(algorithm='{args.clustering_algorithm}')")
+        logger.info("   X_resampled, y_resampled, clusters_resampled = apply_cluster_aware_smote(X, y, clusters)")
+    else:
+        logger.info("📊 Basic data pipeline completed")
+        logger.info("💡 Run with clustering enabled for SMOTE preparation:")
+        logger.info("   python scripts/download_and_organize.py --clustering-algorithm kmeans")
     
     logger.info("\n✅ Data pipeline completed successfully!")
-    logger.info("Ready for model training - run: python scripts/train.py")
 
 
 if __name__ == "__main__":
