@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# scripts/enhance_data.py
+# scripts/cluster_and_smote.py
 """
-Data Enhancement Script
+Cluster Analysis and SMOTE Application Script
 
 This script handles:
 1. Performs clustering analysis
-2. Applies selected clustering
-3. Applies cluster-aware SMOTE
-4. Saves enhanced datasets
+2. Applies cluster-aware SMOTE
+3. Saves processed data
 
 Usage:
-    python scripts/enhance_data.py [--clustering-algorithm ALGORITHM] [--skip-smote] [--debug]
+    python scripts/cluster_and_smote.py [--clustering-algorithm ALG] [--skip-smote] [--debug]
 """
 
 import sys
 import argparse
 from pathlib import Path
+import pandas as pd
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -24,27 +24,33 @@ sys.path.append(str(project_root))
 # Imports after path setup
 from src.utils import setup_logging, get_logger
 from src.data import (
+    perform_clustering, 
     apply_selected_clustering,
     apply_smote_to_train_data
 )
-from src.cluster import perform_clustering
 
 def main():
-    """Main function for data enhancement pipeline."""
+    """Main function for clustering and SMOTE pipeline."""
     parser = argparse.ArgumentParser(
-        description="Enhance CHF data with clustering and SMOTE",
+        description="Cluster analysis and SMOTE application",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Standard enhancement with KMeans and SMOTE
-  python scripts/enhance_data.py --clustering-algorithm kmeans
+  # Standard pipeline with SMOTE
+  python scripts/cluster_and_smote.py
   
   # Skip SMOTE application
-  python scripts/enhance_data.py --skip-smote
+  python scripts/cluster_and_smote.py --skip-smote
   
   # Use hierarchical clustering
-  python scripts/enhance_data.py --clustering-algorithm hierarchical
+  python scripts/cluster_and_smote.py --clustering-algorithm hierarchical
         """
+    )
+    
+    parser.add_argument(
+        '--skip-smote',
+        action='store_true',
+        help='Skip SMOTE application step'
     )
     
     parser.add_argument(
@@ -53,12 +59,6 @@ Examples:
         choices=['kmeans', 'hierarchical', 'dbscan'],
         default='kmeans',
         help='Clustering algorithm to use (default: kmeans)'
-    )
-    
-    parser.add_argument(
-        '--skip-smote',
-        action='store_true',
-        help='Skip SMOTE application step'
     )
     
     parser.add_argument(
@@ -75,13 +75,16 @@ Examples:
     logger = get_logger(__name__)
     
     logger.info("="*60)
-    logger.info("CHF Data Enhancement Pipeline")
+    logger.info("Cluster Analysis and SMOTE Application")
     logger.info("="*60)
+    
+    # Define paths
+    train_path = project_root / 'data/processed/train.csv'
+    test_path = project_root / 'data/processed/test.csv'
     
     # Step 1: Clustering analysis
     logger.info("\n=== Step 1: Clustering Analysis ===")
     try:
-        train_path = Path('data/processed/train.csv')
         clustering_results = perform_clustering(
             data_path=train_path,
             n_clusters_range=(2, 8),
@@ -104,7 +107,7 @@ Examples:
     
     # Step 2: Apply SMOTE
     smote_completed = False
-    if not args.skip_smote and clustering_completed:
+    if not args.skip_smote:
         logger.info("\n=== Step 2: Applying Cluster-Aware SMOTE ===")
         try:
             resampled_train_df, test_df = apply_smote_to_train_data(
@@ -113,7 +116,7 @@ Examples:
             )
             
             logger.info(f"✓ SMOTE applied successfully")
-            logger.info(f"  Original train size: {len(train_df_with_clusters)}")
+            logger.info(f"  Original train size: {len(pd.read_csv(train_path))}")
             logger.info(f"  Resampled train size: {len(resampled_train_df)}")
             logger.info(f"  Test size remains: {len(test_df)}")
             
@@ -122,8 +125,7 @@ Examples:
         except Exception as e:
             logger.error(f"SMOTE application failed: {str(e)}")
     else:
-        skip_reason = "skipped by user" if args.skip_smote else "clustering not completed"
-        logger.info(f"\n=== Step 2: Skipping SMOTE Application ({skip_reason}) ===")
+        logger.info("\n=== Step 2: Skipping SMOTE Application ===")
     
     # Summary
     logger.info("\n" + "="*60)
@@ -148,9 +150,9 @@ Examples:
         logger.info("   train_df, test_df = apply_smote_to_train_data()")
     else:
         logger.info("💡 Run without --skip-smote to apply SMOTE:")
-        logger.info(f"   python scripts/enhance_data.py --clustering-algorithm {args.clustering_algorithm}")
+        logger.info(f"   python scripts/cluster_and_smote.py --clustering-algorithm {args.clustering_algorithm}")
     
-    logger.info("\n✅ Data enhancement completed successfully!")
+    logger.info("\n✅ Cluster and SMOTE pipeline completed successfully!")
 
 if __name__ == "__main__":
     main()

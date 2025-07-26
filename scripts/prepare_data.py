@@ -8,15 +8,16 @@ This script handles:
 2. Performs train/test split
 3. Preprocesses data (encoding, scaling)
 4. Creates EDA plots
-5. Performs data quality checks
+5. Performs data quality check
 
 Usage:
-    python scripts/download_and_preprocess.py [--force-download] [--test-size TEST_SIZE] [--skip-viz]
+    python scripts/download_and_preprocess.py [--force-download] [--test-size TEST_SIZE] [--skip-viz] [--debug]
 """
 
 import sys
 import argparse
 from pathlib import Path
+import pandas as pd
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -38,14 +39,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Standard preprocessing pipeline
+  # Standard preprocessing
   python scripts/download_and_preprocess.py
-  
-  # Skip visualization
-  python scripts/download_and_preprocess.py --skip-viz
   
   # Custom test size and force download
   python scripts/download_and_preprocess.py --test-size 0.3 --force-download
+  
+  # Skip visualization
+  python scripts/download_and_preprocess.py --skip-viz
         """
     )
     
@@ -109,7 +110,6 @@ Examples:
     
     # Step 3: Data quality check
     logger.info("\n=== Step 3: Data Quality Check ===")
-    import pandas as pd
     train_df = pd.read_csv(train_path)
     quality_report = check_data_quality(train_df)
     
@@ -146,13 +146,8 @@ Examples:
     if not args.skip_viz:
         logger.info("✓ EDA plots generated")
     
-    # Next steps
-    logger.info("\n" + "="*50)
-    logger.info("Next Steps")
-    logger.info("="*50)
-    logger.info("🎯 Your data is ready for enhancement:")
-    logger.info("   python scripts/enhance_data.py --clustering-algorithm kmeans")
-    logger.info("\n✅ Data preprocessing completed successfully!")
+    logger.info("\n✅ Data download and preprocessing completed successfully!")
+    logger.info("\nNext step: Run cluster_and_smote.py for clustering and SMOTE processing")
 
 if __name__ == "__main__":
     main()
