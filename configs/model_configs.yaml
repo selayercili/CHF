@@ -92,7 +92,7 @@ pinn:
     lambda_physics: 0.01  # Physics loss weight
   physics:
     equations_config: "physics_configs.yaml"  # Reference to physics config
-    warmup_epochs: 10  # Gradually introduce physics
+    warmup_epochs: 30  # Gradually introduce physics
     adaptive_weighting: true
   training:
     epochs: 100
