@@ -54,22 +54,22 @@ class Pinn:
         eps = 1e-8  # Small epsilon to avoid log(0)
         
         # Convert pressure (MPa → Pa) and ensure positive
-        pressure_Pa = (torch.abs(inputs[:, 1]) + eps) * 1e6  
+        pressure_Pa = (torch.abs(inputs[:, 0]) + eps) * 1e6  
         
         # Convert diameters/length (mm → m)
-        D_h_m = (torch.abs(inputs[:, 5]) + eps) * 1e-3  
-        length_m = (torch.abs(inputs[:, 6]) + eps) * 1e-3  
+        D_h_m = (torch.abs(inputs[:, 3]) + eps) * 1e-3  
+        length_m = (torch.abs(inputs[:, 4]) + eps) * 1e-3  
         
         # Convert CHF (MW/m² → W/m²) if provided
         chf_Wm2 = chf_exp * 1e6 if chf_exp is not None else None
         
         return {
             'pressure_Pa': pressure_Pa,
-            'mass_flux': torch.abs(inputs[:, 2]) + eps,
-            'x_e_out': inputs[:, 3],  # Can be negative
+            'mass_flux': torch.abs(inputs[:, 1]) + eps,
+            'x_e_out': inputs[:, 2],  # Can be negative
             'D_h_m': D_h_m,
             'length_m': length_m,
-            'geom_tube': inputs[:, 7] if inputs.shape[1] >= 8 else torch.zeros_like(pressure_Pa),
+            'geom_tube': inputs[:, 5] if inputs.shape[1] >= 6 else torch.zeros_like(pressure_Pa),
             'geom_annulus': torch.zeros_like(pressure_Pa),  # This feature doesn't exist in the dataset
             'chf_Wm2': chf_Wm2  # Only included if chf_exp was passed
         }
