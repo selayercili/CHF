@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # scripts/train.py
 """
-Model Training Pipeline Script
+Model Training Pipeline Script with SMOTE/Regular Data Support
 
 This script handles the training of multiple models with configurable parameters.
 It loads data, trains models, saves checkpoints, and logs progress.
 
 Usage:
-    python scripts/train.py [--config CONFIG_PATH] [--models MODEL_NAMES] [--debug]
+    python scripts/train.py [--config CONFIG_PATH] [--models MODEL_NAMES] [--data-type DATA_TYPE] [--debug]
 """
 
 import os
@@ -40,18 +40,22 @@ warnings.filterwarnings("ignore", category=UserWarning)
 class ModelTrainer:
     """Orchestrates model training pipeline for multiple models."""
     
-    def __init__(self, config_path: Optional[Path] = None, debug: bool = False):
+    def __init__(self, config_path: Optional[Path] = None, debug: bool = False, data_type: str = 'smote'):
         """
         Initialize the ModelTrainer.
         
         Args:
             config_path: Path to configuration file
             debug: Enable debug logging
+            data_type: Type of training data ('smote' or 'regular')
         """
         # Setup logging first
         log_level = 'DEBUG' if debug else 'INFO'
         setup_logging(log_level=log_level)
         self.logger = get_logger(__name__)
+        
+        # Store data type
+        self.data_type = data_type
         
         # Load configurations
         self.config_manager = ConfigManager(config_path or Path("configs"))
@@ -64,21 +68,29 @@ class ModelTrainer:
         # Setup device
         self.device = get_device()
         
-        # Setup directories
+        # Setup directories with data type suffix
         self.setup_directories()
         
         self.logger.info("="*60)
         self.logger.info("Model Trainer Initialized")
         self.logger.info(f"Config path: {config_path}")
         self.logger.info(f"Debug mode: {debug}")
+        self.logger.info(f"Data type: {data_type}")
         self.logger.info("="*60)
     
     def setup_directories(self) -> None:
         """Create necessary directories."""
+        # Add suffix based on data type
+        suffix = ""
+        if self.data_type == "smote":
+            suffix = "_smote"
+        elif self.data_type == "regular":
+            suffix = "_regular"
+        
         self.dirs = {
-            'weights': Path("weights"),
-            'logs': Path("logs"),
-            'results': Path("results"),
+            'weights': Path(f"weights{suffix}"),
+            'logs': Path(f"logs{suffix}"),
+            'results': Path(f"results{suffix}"),
             'data': Path("data/processed")
         }
         
@@ -87,10 +99,20 @@ class ModelTrainer:
             self.logger.debug(f"Directory ready: {dir_path}")
     
     def load_data(self) -> Dict[str, Any]:
-        """Load and prepare training data."""
-        self.logger.info("Loading training data...")
+        """Load and prepare training data based on data type."""
+        self.logger.info(f"Loading {self.data_type} training data...")
         
-        train_path = self.dirs['data'] / "train_resampled.csv"
+        # Select data file based on type
+        if self.data_type == 'smote':
+            train_path = self.dirs['data'] / "train_resampled.csv"
+            # Fallback to regular if SMOTE doesn't exist
+            if not train_path.exists():
+                self.logger.warning("SMOTE data not found, falling back to regular training data")
+                train_path = self.dirs['data'] / "train.csv"
+                self.data_type = 'regular'  # Update data type
+        else:  # regular
+            train_path = self.dirs['data'] / "train.csv"
+        
         test_path = self.dirs['data'] / "test.csv"
         
         if not train_path.exists():
@@ -105,8 +127,18 @@ class ModelTrainer:
         )
         
         # Log data statistics
+        self.logger.info(f"Data type: {self.data_type.upper()}")
         for split_name, df in data_dict.items():
             self.logger.info(f"{split_name.capitalize()} data shape: {df.shape}")
+            
+        # Log if using SMOTE data
+        if self.data_type == 'smote' and 'train' in data_dict:
+            train_df = data_dict['train']
+            if 'cluster_label' in train_df.columns:
+                cluster_dist = train_df['cluster_label'].value_counts().sort_index()
+                self.logger.info("Cluster distribution in training data:")
+                for cluster_id, count in cluster_dist.items():
+                    self.logger.info(f"  Cluster {cluster_id}: {count} samples")
         
         return data_dict
     
@@ -157,7 +189,7 @@ class ModelTrainer:
             Training results dictionary
         """
         self.logger.info(f"\n{'='*60}")
-        self.logger.info(f"Training {model_name}")
+        self.logger.info(f"Training {model_name} on {self.data_type.upper()} data")
         self.logger.info(f"{'='*60}")
         
         # Get model configuration
@@ -188,6 +220,9 @@ class ModelTrainer:
             window_size=100
         )
         
+        # Add data type to metadata
+        metrics_tracker.update({'data_type': self.data_type})
+        
         # Training parameters
         training_config = model_config.get('training', {})
         epochs = training_config.get('epochs', model_config.get('epochs', 10))
@@ -209,6 +244,9 @@ class ModelTrainer:
         training_start_time = datetime.now()
         
         self.logger.info(f"Starting training for {epochs} epochs...")
+        self.logger.info(f"Training samples: {len(train_data)}")
+        if val_data is not None:
+            self.logger.info(f"Validation samples: {len(val_data)}")
         
         for epoch in range(epochs):
             epoch_start_time = datetime.now()
@@ -249,10 +287,17 @@ class ModelTrainer:
                 if is_best:
                     best_val_loss = current_loss
                 
+                # Add data type to checkpoint metadata
+                checkpoint_metadata = {
+                    **train_metrics, 
+                    **{f'val_{k}': v for k, v in val_metrics.items()},
+                    'data_type': self.data_type
+                }
+                
                 checkpoint_manager.save_checkpoint(
                     model=model,
                     epoch=epoch + 1,
-                    metrics={**train_metrics, **{f'val_{k}': v for k, v in val_metrics.items()}},
+                    metrics=checkpoint_metadata,
                     is_best=is_best
                 )
                 
@@ -277,13 +322,14 @@ class ModelTrainer:
         
         results = {
             'model_name': model_name,
+            'data_type': self.data_type,
             'epochs_trained': epoch + 1,
             'best_val_loss': best_val_loss,
             'training_time': training_time,
             'metrics_summary': summary
         }
         
-        self.logger.info(f"\nTraining completed for {model_name}")
+        self.logger.info(f"\nTraining completed for {model_name} on {self.data_type.upper()} data")
         self.logger.info(f"Total time: {training_time/60:.2f} minutes")
         self.logger.info(f"Best validation loss: {best_val_loss:.6f}")
         
@@ -307,7 +353,7 @@ class ModelTrainer:
             model_names = [name for name in self.model_config.keys() 
                           if name != 'global_settings']
         
-        self.logger.info(f"\nWill train {len(model_names)} models: {model_names}")
+        self.logger.info(f"\nWill train {len(model_names)} models on {self.data_type.upper()} data: {model_names}")
         
         # Train each model
         all_results = {}
@@ -327,7 +373,7 @@ class ModelTrainer:
         
         # Summary
         self.logger.info("\n" + "="*60)
-        self.logger.info("TRAINING SUMMARY")
+        self.logger.info(f"TRAINING SUMMARY ({self.data_type.upper()} data)")
         self.logger.info("="*60)
         
         for model_name, results in all_results.items():
@@ -348,11 +394,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Train all models
-  python scripts/train.py
+  # Train all models on SMOTE data
+  python scripts/train.py --data-type smote
   
-  # Train specific models
-  python scripts/train.py --models xgboost lightgbm
+  # Train all models on regular data
+  python scripts/train.py --data-type regular
+  
+  # Train specific models on regular data
+  python scripts/train.py --models xgboost lightgbm --data-type regular
   
   # Use custom config
   python scripts/train.py --config configs/custom_config.yaml
@@ -377,6 +426,14 @@ Examples:
     )
     
     parser.add_argument(
+        '--data-type',
+        type=str,
+        choices=['smote', 'regular'],
+        default='smote',
+        help='Type of training data to use (default: smote)'
+    )
+    
+    parser.add_argument(
         '--debug',
         action='store_true',
         help='Enable debug logging'
@@ -392,7 +449,11 @@ Examples:
     
     # Initialize trainer
     config_path = Path(args.config)
-    trainer = ModelTrainer(config_path=config_path, debug=args.debug)
+    trainer = ModelTrainer(
+        config_path=config_path, 
+        debug=args.debug,
+        data_type=args.data_type
+    )
     
     # Run training
     try:

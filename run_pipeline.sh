@@ -1,6 +1,6 @@
 #!/bin/bash
 # run_pipeline.sh
-# Automated pipeline script for CHF prediction project
+# Automated pipeline script for CHF prediction project with SMOTE comparison support
 
 # Color codes for output
 RED='\033[0;31m'
@@ -36,9 +36,139 @@ check_python_package() {
     python -c "import $1" 2>/dev/null
 }
 
+# Parse command line arguments
+SKIP_DOWNLOAD=false
+SKIP_TRAIN=false
+SKIP_TEST=false
+SKIP_EVAL=false
+MODELS=""
+DATA_TYPE="both"  # New: default to both for comparison
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --skip-download)
+            SKIP_DOWNLOAD=true
+            shift
+            ;;
+        --skip-train)
+            SKIP_TRAIN=true
+            shift
+            ;;
+        --skip-test)
+            SKIP_TEST=true
+            shift
+            ;;
+        --skip-eval)
+            SKIP_EVAL=true
+            shift
+            ;;
+        --models)
+            shift
+            MODELS="$1"
+            shift
+            ;;
+        --data-type)
+            shift
+            DATA_TYPE="$1"
+            shift
+            ;;
+        --help)
+            echo "Usage: $0 [options]"
+            echo ""
+            echo "Options:"
+            echo "  --skip-download    Skip data download step"
+            echo "  --skip-train       Skip model training step"
+            echo "  --skip-test        Skip model testing step"
+            echo "  --skip-eval        Skip evaluation step"
+            echo "  --models MODELS    Train specific models (space-separated)"
+            echo "  --data-type TYPE   Data type: 'smote', 'regular', or 'both' (default: both)"
+            echo "  --help             Show this help message"
+            echo ""
+            echo "Example:"
+            echo "  $0 --models \"xgboost lightgbm\" --data-type both"
+            exit 0
+            ;;
+        *)
+            print_error "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Function to run pipeline for a specific data type
+run_pipeline_for_data_type() {
+    local data_type=$1
+    local suffix=""
+    
+    if [ "$data_type" = "smote" ]; then
+        suffix="_smote"
+    elif [ "$data_type" = "regular" ]; then
+        suffix="_regular"
+    fi
+    
+    echo ""
+    echo "============================================"
+    echo "     Running Pipeline for ${data_type^^} Data"
+    echo "============================================"
+    echo ""
+    
+    # Create data-type specific directories
+    print_status "Creating directories for $data_type data..."
+    mkdir -p logs$suffix
+    mkdir -p weights$suffix
+    mkdir -p results$suffix
+    mkdir -p reports$suffix/{figures,metrics}
+    print_success "Directories created for $data_type data"
+    
+    # Step 2: Train models
+    if [ "$SKIP_TRAIN" = false ]; then
+        echo ""
+        print_status "Training models on $data_type data..."
+        
+        if [ -n "$MODELS" ]; then
+            python scripts/train.py --models $MODELS --data-type $data_type
+        else
+            python scripts/train.py --data-type $data_type
+        fi
+        
+        if [ $? -eq 0 ]; then
+            print_success "Model training completed for $data_type data"
+        else
+            print_error "Model training failed for $data_type data"
+            return 1
+        fi
+    else
+        print_warning "Skipping model training step"
+    fi
+    
+    # Step 3: Test models
+    if [ "$SKIP_TEST" = false ]; then
+        echo ""
+        print_status "Testing models trained on $data_type data..."
+        
+        if [ -n "$MODELS" ]; then
+            python scripts/test.py --models $MODELS --data-type $data_type
+        else
+            python scripts/test.py --data-type $data_type
+        fi
+        
+        if [ $? -eq 0 ]; then
+            print_success "Model testing completed for $data_type data"
+        else
+            print_error "Model testing failed for $data_type data"
+            return 1
+        fi
+    else
+        print_warning "Skipping model testing step"
+    fi
+    
+    return 0
+}
+
 # Banner
 echo "============================================"
 echo "     CHF Prediction Pipeline Runner"
+echo "      Data Type: ${DATA_TYPE^^}"
 echo "============================================"
 echo ""
 
@@ -91,71 +221,17 @@ else
     print_success "Dependencies already installed"
 fi
 
-# Create necessary directories
-print_status "Creating project directories..."
+# Create base directories
+print_status "Creating base project directories..."
 mkdir -p data/{raw,processed}
 mkdir -p logs
-mkdir -p weights
-mkdir -p results
-mkdir -p reports/{figures,metrics}
-print_success "Directories created"
+mkdir -p reports
+print_success "Base directories created"
 
-# Parse command line arguments
-SKIP_DOWNLOAD=false
-SKIP_TRAIN=false
-SKIP_TEST=false
-SKIP_EVAL=false
-MODELS=""
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --skip-download)
-            SKIP_DOWNLOAD=true
-            shift
-            ;;
-        --skip-train)
-            SKIP_TRAIN=true
-            shift
-            ;;
-        --skip-test)
-            SKIP_TEST=true
-            shift
-            ;;
-        --skip-eval)
-            SKIP_EVAL=true
-            shift
-            ;;
-        --models)
-            shift
-            MODELS="$1"
-            shift
-            ;;
-        --help)
-            echo "Usage: $0 [options]"
-            echo ""
-            echo "Options:"
-            echo "  --skip-download    Skip data download step"
-            echo "  --skip-train       Skip model training step"
-            echo "  --skip-test        Skip model testing step"
-            echo "  --skip-eval        Skip evaluation step"
-            echo "  --models MODELS    Train specific models (space-separated)"
-            echo "  --help             Show this help message"
-            echo ""
-            echo "Example:"
-            echo "  $0 --models \"xgboost lightgbm\""
-            exit 0
-            ;;
-        *)
-            print_error "Unknown option: $1"
-            exit 1
-            ;;
-    esac
-done
-
-# Step 1: Download and organize data
+# Step 1: Download and organize data (only needed once)
 if [ "$SKIP_DOWNLOAD" = false ]; then
     echo ""
-    print_status "Step 1/4: Downloading and organizing data..."
+    print_status "Step 1: Downloading and organizing data..."
     python scripts/download_and_organize.py
     
     if [ $? -eq 0 ]; then
@@ -168,62 +244,55 @@ else
     print_warning "Skipping data download step"
 fi
 
-# Step 2: Train models
-if [ "$SKIP_TRAIN" = false ]; then
-    echo ""
-    print_status "Step 2/4: Training models..."
+# Run pipeline based on data type
+if [ "$DATA_TYPE" = "both" ]; then
+    # Run for both data types
+    run_pipeline_for_data_type "regular"
+    REGULAR_RESULT=$?
     
-    if [ -n "$MODELS" ]; then
-        python scripts/train.py --models $MODELS
-    else
-        python scripts/train.py
-    fi
+    run_pipeline_for_data_type "smote"
+    SMOTE_RESULT=$?
     
-    if [ $? -eq 0 ]; then
-        print_success "Model training completed"
-    else
-        print_error "Model training failed"
+    if [ $REGULAR_RESULT -ne 0 ] || [ $SMOTE_RESULT -ne 0 ]; then
+        print_error "One or more pipelines failed"
         exit 1
     fi
-else
-    print_warning "Skipping model training step"
-fi
-
-# Step 3: Test models
-if [ "$SKIP_TEST" = false ]; then
-    echo ""
-    print_status "Step 3/4: Testing models..."
     
-    if [ -n "$MODELS" ]; then
-        python scripts/test.py --models $MODELS
-    else
-        python scripts/test.py
+    # Run comparative evaluation
+    if [ "$SKIP_EVAL" = false ]; then
+        echo ""
+        print_status "Generating comparative evaluation reports..."
+        python scripts/evaluate.py --comparison-mode --data-type both
+        
+        if [ $? -eq 0 ]; then
+            print_success "Comparative evaluation completed"
+        else
+            print_error "Comparative evaluation failed"
+            exit 1
+        fi
     fi
+else
+    # Run for single data type
+    run_pipeline_for_data_type "$DATA_TYPE"
     
-    if [ $? -eq 0 ]; then
-        print_success "Model testing completed"
-    else
-        print_error "Model testing failed"
+    if [ $? -ne 0 ]; then
+        print_error "Pipeline failed"
         exit 1
     fi
-else
-    print_warning "Skipping model testing step"
-fi
-
-# Step 4: Generate evaluation reports
-if [ "$SKIP_EVAL" = false ]; then
-    echo ""
-    print_status "Step 4/4: Generating evaluation reports..."
-    python scripts/evaluate.py
     
-    if [ $? -eq 0 ]; then
-        print_success "Evaluation completed"
-    else
-        print_error "Evaluation failed"
-        exit 1
+    # Run standard evaluation
+    if [ "$SKIP_EVAL" = false ]; then
+        echo ""
+        print_status "Generating evaluation reports..."
+        python scripts/evaluate.py --data-type "$DATA_TYPE"
+        
+        if [ $? -eq 0 ]; then
+            print_success "Evaluation completed"
+        else
+            print_error "Evaluation failed"
+            exit 1
+        fi
     fi
-else
-    print_warning "Skipping evaluation step"
 fi
 
 # Summary
@@ -234,20 +303,43 @@ echo "============================================"
 echo ""
 print_success "All steps completed successfully"
 echo ""
-echo "Results available in:"
-echo "  - Model weights: weights/"
-echo "  - Test results: results/"
-echo "  - Evaluation reports: reports/"
+
+if [ "$DATA_TYPE" = "both" ]; then
+    echo "Results available in:"
+    echo "  Regular data:"
+    echo "    - Model weights: weights_regular/"
+    echo "    - Test results: results_regular/"
+    echo "    - Evaluation reports: reports_regular/"
+    echo ""
+    echo "  SMOTE data:"
+    echo "    - Model weights: weights_smote/"
+    echo "    - Test results: results_smote/"
+    echo "    - Evaluation reports: reports_smote/"
+    echo ""
+    echo "  Comparative analysis: reports/comparison/"
+else
+    SUFFIX=""
+    if [ "$DATA_TYPE" = "smote" ]; then
+        SUFFIX="_smote"
+    elif [ "$DATA_TYPE" = "regular" ]; then
+        SUFFIX="_regular"
+    fi
+    
+    echo "Results available in:"
+    echo "  - Model weights: weights$SUFFIX/"
+    echo "  - Test results: results$SUFFIX/"
+    echo "  - Evaluation reports: reports$SUFFIX/"
+fi
 echo ""
 
 # Open report if available
-if [ -f "reports/evaluation_report.md" ]; then
-    print_status "Evaluation report available at: reports/evaluation_report.md"
+if [ "$DATA_TYPE" = "both" ] && [ -f "reports/comparison/comparison_report.md" ]; then
+    print_status "Comparison report available at: reports/comparison/comparison_report.md"
     
     # Try to open in default browser/editor
     if command_exists xdg-open; then
-        xdg-open reports/evaluation_report.md 2>/dev/null &
+        xdg-open reports/comparison/comparison_report.md 2>/dev/null &
     elif command_exists open; then
-        open reports/evaluation_report.md 2>/dev/null &
+        open reports/comparison/comparison_report.md 2>/dev/null &
     fi
 fi

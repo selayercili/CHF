@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # scripts/test.py
 """
-Model Testing and Evaluation Script
+Model Testing and Evaluation Script with SMOTE/Regular Data Support
 
 This script loads trained models and evaluates them on test data.
 It saves predictions and metrics for further analysis.
 
 Usage:
-    python scripts/test.py [--config CONFIG_PATH] [--models MODEL_NAMES] [--weights-type WEIGHTS_TYPE]
+    python scripts/test.py [--config CONFIG_PATH] [--models MODEL_NAMES] [--data-type DATA_TYPE] [--weights-type WEIGHTS_TYPE]
 """
 
 import os
@@ -42,13 +42,14 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 class ModelTester:
     """Handles model testing and evaluation pipeline."""
     
-    def __init__(self, config_path: Optional[Path] = None, debug: bool = False):
+    def __init__(self, config_path: Optional[Path] = None, debug: bool = False, data_type: str = 'both'):
         """
         Initialize the ModelTester.
         
         Args:
             config_path: Path to configuration file
             debug: Enable debug logging
+            data_type: Type of models to test ('smote', 'regular', or 'both')
         """
         # Setup logging
         log_level = 'DEBUG' if debug else 'INFO'
@@ -59,26 +60,48 @@ class ModelTester:
         self.config_manager = ConfigManager(config_path or Path("configs"))
         self.model_config = self.config_manager.get('model_configs')
         
-        # Setup directories
-        self.dirs = {
-            'weights': Path("weights"),
-            'results': Path("results"),
-            'data': Path("data/processed")
-        }
+        # Store data type
+        self.data_type = data_type
         
-        # Create results directory
-        self.dirs['results'].mkdir(exist_ok=True)
+        # Setup directories based on data type
+        self.setup_directories()
         
         self.logger.info("="*60)
         self.logger.info("Model Tester Initialized")
         self.logger.info(f"Config path: {config_path}")
+        self.logger.info(f"Data type: {data_type}")
         self.logger.info("="*60)
+    
+    def setup_directories(self):
+        """Setup directories based on data type."""
+        if self.data_type == 'both':
+            self.weights_dirs = {
+                'smote': Path("weights_smote"),
+                'regular': Path("weights_regular")
+            }
+            self.results_dirs = {
+                'smote': Path("results_smote"),
+                'regular': Path("results_regular")
+            }
+        elif self.data_type == 'smote':
+            self.weights_dirs = {'smote': Path("weights_smote")}
+            self.results_dirs = {'smote': Path("results_smote")}
+        else:  # regular
+            self.weights_dirs = {'regular': Path("weights_regular")}
+            self.results_dirs = {'regular': Path("results_regular")}
+        
+        # Create results directories
+        for results_dir in self.results_dirs.values():
+            results_dir.mkdir(exist_ok=True)
+        
+        # Data directory
+        self.data_dir = Path("data/processed")
     
     def load_test_data(self) -> pd.DataFrame:
         """Load test data."""
         self.logger.info("Loading test data...")
         
-        test_path = self.dirs['data'] / "test.csv"
+        test_path = self.data_dir / "test.csv"
         
         if not test_path.exists():
             raise FileNotFoundError(f"Test data not found: {test_path}")
@@ -111,21 +134,22 @@ class ModelTester:
         
         return model_class(**init_params)
     
-    def find_best_weights(self, model_name: str, weights_type: str = "best") -> Optional[Path]:
+    def find_best_weights(self, model_name: str, weights_dir: Path, weights_type: str = "best") -> Optional[Path]:
         """
         Find the best weights file for a model.
         
         Args:
             model_name: Name of the model
+            weights_dir: Directory containing weights
             weights_type: Type of weights to load ("best" or "latest")
             
         Returns:
             Path to weights file or None
         """
-        model_weights_dir = self.dirs['weights'] / model_name
+        model_weights_dir = weights_dir / model_name
         
         if not model_weights_dir.exists():
-            self.logger.warning(f"No weights directory found for {model_name}")
+            self.logger.warning(f"No weights directory found for {model_name} in {weights_dir}")
             return None
         
         if weights_type == "best":
@@ -151,6 +175,7 @@ class ModelTester:
         return None
     
     def test_model(self, model_name: str, test_data: pd.DataFrame, 
+                   weights_dir: Path, results_dir: Path, data_type_label: str,
                    weights_type: str = "best") -> Optional[Dict[str, Any]]:
         """
         Test a single model.
@@ -158,17 +183,20 @@ class ModelTester:
         Args:
             model_name: Name of the model to test
             test_data: Test dataframe
+            weights_dir: Directory containing model weights
+            results_dir: Directory to save results
+            data_type_label: Label for data type ('smote' or 'regular')
             weights_type: Type of weights to load
             
         Returns:
             Dictionary containing predictions and metrics
         """
-        self.logger.info(f"\nTesting {model_name}...")
+        self.logger.info(f"\nTesting {model_name} (trained on {data_type_label.upper()} data)...")
         
         # Find weights
-        weights_path = self.find_best_weights(model_name, weights_type)
+        weights_path = self.find_best_weights(model_name, weights_dir, weights_type)
         if weights_path is None:
-            self.logger.error(f"No weights found for {model_name}")
+            self.logger.error(f"No weights found for {model_name} in {weights_dir}")
             return None
         
         self.logger.info(f"Loading weights from: {weights_path}")
@@ -233,6 +261,7 @@ class ModelTester:
             # Prepare results
             results = {
                 'model_name': model_name,
+                'data_type': data_type_label,
                 'weights_path': str(weights_path),
                 'timestamp': datetime.now().isoformat(),
                 'metrics': metrics,
@@ -250,7 +279,7 @@ class ModelTester:
                     self.logger.warning(f"Failed to get feature importance for {model_name}")
             
             # Log summary metrics
-            self.logger.info(f"Test metrics for {model_name}:")
+            self.logger.info(f"Test metrics for {model_name} ({data_type_label}):")
             self.logger.info(f"  RMSE: {metrics['rmse']:.6f}")
             self.logger.info(f"  MAE: {metrics['mae']:.6f}")
             self.logger.info(f"  R²: {metrics['r2']:.6f}")
@@ -263,13 +292,13 @@ class ModelTester:
             self.logger.exception("Detailed traceback:")
             return None
     
-    def save_results(self, results: Dict[str, Any], model_name: str) -> None:
+    def save_results(self, results: Dict[str, Any], model_name: str, results_dir: Path) -> None:
         """Save test results and predictions."""
         if results is None:
             return
         
         # Create model results directory
-        model_results_dir = self.dirs['results'] / model_name
+        model_results_dir = results_dir / model_name
         model_results_dir.mkdir(exist_ok=True)
         
         # Save predictions as CSV
@@ -288,6 +317,7 @@ class ModelTester:
         # Save metrics as JSON
         metrics_data = {
             'model_name': results['model_name'],
+            'data_type': results['data_type'],
             'weights_path': results['weights_path'],
             'timestamp': results['timestamp'],
             'metrics': results['metrics'],
@@ -312,6 +342,7 @@ class ModelTester:
         
         # Save summary statistics
         summary_stats = {
+            'data_type': results['data_type'],
             'prediction_stats': {
                 'mean': float(predictions_df['predicted'].mean()),
                 'std': float(predictions_df['predicted'].std()),
@@ -345,34 +376,59 @@ class ModelTester:
         # Load test data once
         test_data = self.load_test_data()
         
-        # Get list of models to test
-        if model_names is None:
-            # Find models with saved weights
-            model_names = []
-            for model_dir in self.dirs['weights'].iterdir():
-                if model_dir.is_dir() and model_dir.name in model_registry:
-                    model_names.append(model_dir.name)
-        
-        self.logger.info(f"\nFound {len(model_names)} models to test: {model_names}")
-        
-        # Test each model
+        # Test each model for each data type
         all_results = {}
         
-        for model_name in tqdm(model_names, desc="Testing models"):
-            try:
-                results = self.test_model(model_name, test_data, weights_type)
-                if results:
-                    all_results[model_name] = results
-                    self.save_results(results, model_name)
-            except KeyboardInterrupt:
-                self.logger.warning("Testing interrupted by user")
-                break
-            except Exception as e:
-                self.logger.error(f"Failed to test {model_name}: {str(e)}")
-                continue
+        for data_type_label, weights_dir in self.weights_dirs.items():
+            results_dir = self.results_dirs[data_type_label]
+            
+            self.logger.info(f"\n{'='*60}")
+            self.logger.info(f"Testing models trained on {data_type_label.upper()} data")
+            self.logger.info(f"{'='*60}")
+            
+            # Get list of models to test
+            if model_names is None:
+                # Find models with saved weights
+                found_models = []
+                if weights_dir.exists():
+                    for model_dir in weights_dir.iterdir():
+                        if model_dir.is_dir() and model_dir.name in model_registry:
+                            found_models.append(model_dir.name)
+                model_names_to_test = found_models
+            else:
+                model_names_to_test = model_names
+            
+            self.logger.info(f"Found {len(model_names_to_test)} models to test: {model_names_to_test}")
+            
+            # Test each model
+            for model_name in tqdm(model_names_to_test, desc=f"Testing {data_type_label} models"):
+                try:
+                    results = self.test_model(
+                        model_name, test_data, weights_dir, results_dir, 
+                        data_type_label, weights_type
+                    )
+                    if results:
+                        # Key includes both model name and data type
+                        result_key = f"{model_name}_{data_type_label}"
+                        all_results[result_key] = results
+                        self.save_results(results, model_name, results_dir)
+                except KeyboardInterrupt:
+                    self.logger.warning("Testing interrupted by user")
+                    break
+                except Exception as e:
+                    self.logger.error(f"Failed to test {model_name}: {str(e)}")
+                    continue
+            
+            # Save comparison summary for this data type
+            self.save_comparison_summary(
+                {k: v for k, v in all_results.items() if k.endswith(f"_{data_type_label}")},
+                results_dir,
+                data_type_label
+            )
         
-        # Save comparison summary
-        self.save_comparison_summary(all_results)
+        # If testing both, create combined comparison
+        if self.data_type == 'both':
+            self.save_combined_comparison(all_results)
         
         self.logger.info("\n" + "="*60)
         self.logger.info("TESTING COMPLETED")
@@ -380,32 +436,34 @@ class ModelTester:
         
         return all_results
     
-    def save_comparison_summary(self, all_results: Dict[str, Dict[str, Any]]) -> None:
-        """Save summary comparison of all models."""
-        if not all_results:
+    def save_comparison_summary(self, results: Dict[str, Dict[str, Any]], 
+                               results_dir: Path, data_type_label: str) -> None:
+        """Save summary comparison of models for a specific data type."""
+        if not results:
             return
         
         # Create comparison data
         comparison_data = []
         
-        for model_name, results in all_results.items():
+        for result_key, result in results.items():
             row = {
-                'model': model_name,
-                'timestamp': results['timestamp'],
-                **results['metrics']
+                'model': result['model_name'],
+                'data_type': data_type_label,
+                'timestamp': result['timestamp'],
+                **result['metrics']
             }
             comparison_data.append(row)
         
         # Save as CSV
         comparison_df = pd.DataFrame(comparison_data)
-        comparison_path = self.dirs['results'] / 'model_comparison.csv'
+        comparison_path = results_dir / 'model_comparison.csv'
         comparison_df.to_csv(comparison_path, index=False)
-        self.logger.info(f"Saved model comparison to: {comparison_path}")
+        self.logger.info(f"Saved {data_type_label} model comparison to: {comparison_path}")
         
         # Save as markdown
-        markdown_path = self.dirs['results'] / 'model_comparison.md'
+        markdown_path = results_dir / 'model_comparison.md'
         with open(markdown_path, 'w') as f:
-            f.write("# Model Comparison Results\n\n")
+            f.write(f"# Model Comparison Results - {data_type_label.upper()} Data\n\n")
             f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             
             # Sort by RMSE
@@ -432,8 +490,73 @@ class ModelTester:
                 f.write(f"- **Highest R²**: {best_r2['model']} ({best_r2['r2']:.6f})\n")
         
         # Print summary to console
-        self.logger.info("\nModel Comparison Summary:")
+        self.logger.info(f"\nModel Comparison Summary ({data_type_label.upper()}):")
         print(comparison_df[['model', 'rmse', 'mae', 'r2']].to_string(index=False))
+    
+    def save_combined_comparison(self, all_results: Dict[str, Dict[str, Any]]) -> None:
+        """Save combined comparison of all models across data types."""
+        if not all_results:
+            return
+        
+        # Create combined results directory
+        combined_dir = Path("results") / "combined_comparison"
+        combined_dir.mkdir(exist_ok=True)
+        
+        # Create comparison data
+        comparison_data = []
+        
+        for result_key, result in all_results.items():
+            row = {
+                'model': result['model_name'],
+                'data_type': result['data_type'],
+                'timestamp': result['timestamp'],
+                **result['metrics']
+            }
+            comparison_data.append(row)
+        
+        # Save as CSV
+        comparison_df = pd.DataFrame(comparison_data)
+        comparison_path = combined_dir / 'all_models_comparison.csv'
+        comparison_df.to_csv(comparison_path, index=False)
+        self.logger.info(f"Saved combined comparison to: {comparison_path}")
+        
+        # Create comparison report
+        report_path = combined_dir / 'comparison_report.md'
+        with open(report_path, 'w') as f:
+            f.write("# Combined Model Comparison - SMOTE vs Regular Data\n\n")
+            f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            
+            # Overall best model
+            f.write("## Overall Best Model\n\n")
+            best_overall = comparison_df.loc[comparison_df['rmse'].idxmin()]
+            f.write(f"**{best_overall['model']} ({best_overall['data_type'].upper()})** - RMSE: {best_overall['rmse']:.6f}\n\n")
+            
+            # Comparison by model
+            f.write("## Model Performance: SMOTE vs Regular\n\n")
+            
+            for model_name in comparison_df['model'].unique():
+                f.write(f"### {model_name}\n\n")
+                model_data = comparison_df[comparison_df['model'] == model_name]
+                
+                if len(model_data) == 2:  # Both SMOTE and regular
+                    smote_data = model_data[model_data['data_type'] == 'smote'].iloc[0]
+                    regular_data = model_data[model_data['data_type'] == 'regular'].iloc[0]
+                    
+                    # Calculate improvements
+                    rmse_improvement = (regular_data['rmse'] - smote_data['rmse']) / regular_data['rmse'] * 100
+                    r2_improvement = (smote_data['r2'] - regular_data['r2']) / abs(regular_data['r2']) * 100
+                    
+                    f.write("| Metric | Regular | SMOTE | Improvement |\n")
+                    f.write("|--------|---------|-------|-------------|\n")
+                    f.write(f"| RMSE | {regular_data['rmse']:.6f} | {smote_data['rmse']:.6f} | {rmse_improvement:+.1f}% |\n")
+                    f.write(f"| MAE | {regular_data['mae']:.6f} | {smote_data['mae']:.6f} | - |\n")
+                    f.write(f"| R² | {regular_data['r2']:.6f} | {smote_data['r2']:.6f} | {r2_improvement:+.1f}% |\n")
+                    f.write("\n")
+            
+            # Summary statistics
+            f.write("## Summary Statistics\n\n")
+            summary = comparison_df.groupby('data_type')[['rmse', 'mae', 'r2']].agg(['mean', 'std'])
+            f.write(summary.to_markdown())
 
 
 def main():
@@ -443,11 +566,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Test all models with best weights
-  python scripts/test.py
+  # Test all models (both SMOTE and regular)
+  python scripts/test.py --data-type both
+  
+  # Test only SMOTE-trained models
+  python scripts/test.py --data-type smote
+  
+  # Test only regular-trained models
+  python scripts/test.py --data-type regular
   
   # Test specific models
-  python scripts/test.py --models xgboost lightgbm
+  python scripts/test.py --models xgboost lightgbm --data-type both
   
   # Use latest weights instead of best
   python scripts/test.py --weights-type latest
@@ -472,6 +601,14 @@ Examples:
     )
     
     parser.add_argument(
+        '--data-type',
+        type=str,
+        choices=['smote', 'regular', 'both'],
+        default='both',
+        help='Test models trained on SMOTE, regular, or both data types (default: both)'
+    )
+    
+    parser.add_argument(
         '--weights-type',
         type=str,
         choices=['best', 'latest'],
@@ -489,7 +626,11 @@ Examples:
     
     # Initialize tester
     config_path = Path(args.config)
-    tester = ModelTester(config_path=config_path, debug=args.debug)
+    tester = ModelTester(
+        config_path=config_path, 
+        debug=args.debug,
+        data_type=args.data_type
+    )
     
     # Run testing
     try:

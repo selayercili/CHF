@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # scripts/evaluate.py
 """
-Model Evaluation and Visualization Script
+Model Evaluation and Visualization Script with SMOTE Comparison Support
 
 This script generates comprehensive evaluation plots and reports
-for all tested models.
+for all tested models, including comparisons between SMOTE and regular data.
 
 Usage:
-    python scripts/evaluate.py [--results-dir RESULTS_DIR] [--format FORMAT]
+    python scripts/evaluate.py [--data-type DATA_TYPE] [--comparison-mode] [--format FORMAT]
 """
 
 import os
@@ -17,13 +17,14 @@ import json
 import pickle
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.backends.backend_pdf import PdfPages
 import warnings
+from scipy import stats
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -50,36 +51,57 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 class ModelEvaluator:
     """Handles comprehensive model evaluation and visualization."""
     
-    def __init__(self, results_dir: str = "./results", debug: bool = False):
+    def __init__(self, debug: bool = False, data_type: str = 'both', comparison_mode: bool = False):
         """
         Initialize the ModelEvaluator.
         
         Args:
-            results_dir: Directory containing model test results
             debug: Enable debug logging
+            data_type: Data type to evaluate ('smote', 'regular', or 'both')
+            comparison_mode: Enable SMOTE vs Regular comparison mode
         """
         # Setup logging
         log_level = 'DEBUG' if debug else 'INFO'
         setup_logging(log_level=log_level)
         self.logger = get_logger(__name__)
         
-        # Setup directories
-        self.results_dir = Path(results_dir)
-        self.figures_dir = Path("reports/figures")
-        self.reports_dir = Path("reports")
+        # Store settings
+        self.data_type = data_type
+        self.comparison_mode = comparison_mode
         
-        # Create directories
-        self.figures_dir.mkdir(parents=True, exist_ok=True)
-        self.reports_dir.mkdir(exist_ok=True)
+        # Setup directories based on data type
+        self.setup_directories()
         
         # Set plotting style
         self.setup_plotting_style()
         
         self.logger.info("="*60)
         self.logger.info("Model Evaluator Initialized")
-        self.logger.info(f"Results directory: {self.results_dir}")
-        self.logger.info(f"Figures directory: {self.figures_dir}")
+        self.logger.info(f"Data type: {data_type}")
+        self.logger.info(f"Comparison mode: {comparison_mode}")
         self.logger.info("="*60)
+    
+    def setup_directories(self):
+        """Setup directories based on data type and mode."""
+        if self.comparison_mode or self.data_type == 'both':
+            self.results_dirs = {
+                'smote': Path("results_smote"),
+                'regular': Path("results_regular")
+            }
+            self.figures_dir = Path("reports/comparison/figures")
+            self.reports_dir = Path("reports/comparison")
+        elif self.data_type == 'smote':
+            self.results_dirs = {'smote': Path("results_smote")}
+            self.figures_dir = Path("reports_smote/figures")
+            self.reports_dir = Path("reports_smote")
+        else:  # regular
+            self.results_dirs = {'regular': Path("results_regular")}
+            self.figures_dir = Path("reports_regular/figures")
+            self.reports_dir = Path("reports_regular")
+        
+        # Create directories
+        self.figures_dir.mkdir(parents=True, exist_ok=True)
+        self.reports_dir.mkdir(exist_ok=True)
     
     def setup_plotting_style(self):
         """Setup matplotlib plotting style."""
@@ -100,26 +122,26 @@ class ModelEvaluator:
             'savefig.bbox': 'tight'
         })
     
-    def load_model_results(self, model_name: str) -> Optional[Dict[str, Any]]:
+    def load_model_results(self, model_name: str, results_dir: Path) -> Optional[Dict[str, Any]]:
         """Load results for a specific model."""
-        model_results_dir = self.results_dir / model_name
+        model_results_dir = results_dir / model_name
         
         # Check if directory exists
         if not model_results_dir.exists():
-            self.logger.warning(f"No results directory found for {model_name}")
+            self.logger.warning(f"No results directory found for {model_name} in {results_dir}")
             return None
         
         # Load full results pickle
         results_path = model_results_dir / 'full_results.pkl'
         if not results_path.exists():
-            self.logger.warning(f"No results pickle found for {model_name}")
+            self.logger.warning(f"No results pickle found for {model_name} in {results_dir}")
             return None
         
         try:
             with open(results_path, 'rb') as f:
                 results = pickle.load(f)
             
-            self.logger.debug(f"Loaded results for {model_name}")
+            self.logger.debug(f"Loaded results for {model_name} from {results_dir}")
             return results
             
         except Exception as e:
@@ -127,32 +149,44 @@ class ModelEvaluator:
             return None
     
     def load_all_results(self) -> Dict[str, Dict[str, Any]]:
-        """Load results for all models."""
+        """Load results for all models from all data types."""
         all_results = {}
         
-        # Find all model directories
-        for model_dir in self.results_dir.iterdir():
-            if model_dir.is_dir():
-                model_name = model_dir.name
-                results = self.load_model_results(model_name)
-                if results:
-                    all_results[model_name] = results
+        for data_type, results_dir in self.results_dirs.items():
+            if not results_dir.exists():
+                self.logger.warning(f"Results directory not found: {results_dir}")
+                continue
+                
+            # Find all model directories
+            for model_dir in results_dir.iterdir():
+                if model_dir.is_dir():
+                    model_name = model_dir.name
+                    results = self.load_model_results(model_name, results_dir)
+                    if results:
+                        # Key includes both model name and data type
+                        key = f"{model_name}_{data_type}"
+                        all_results[key] = results
         
-        self.logger.info(f"Loaded results for {len(all_results)} models")
+        self.logger.info(f"Loaded results for {len(all_results)} model-data combinations")
         return all_results
     
-    def evaluate_single_model(self, model_name: str, results: Dict[str, Any]) -> None:
+    def evaluate_single_model(self, model_key: str, results: Dict[str, Any]) -> None:
         """
         Generate evaluation plots for a single model.
         
         Args:
-            model_name: Name of the model
+            model_key: Key identifying model and data type (e.g., "xgboost_smote")
             results: Model results dictionary
         """
-        self.logger.info(f"\nEvaluating {model_name}...")
+        self.logger.info(f"\nEvaluating {model_key}...")
+        
+        # Parse model name and data type
+        parts = model_key.rsplit('_', 1)
+        model_name = parts[0]
+        data_type = parts[1] if len(parts) > 1 else ''
         
         # Create model-specific directory
-        model_figures_dir = self.figures_dir / model_name
+        model_figures_dir = self.figures_dir / model_key
         model_figures_dir.mkdir(exist_ok=True)
         
         # Extract data
@@ -167,19 +201,21 @@ class ModelEvaluator:
             ('error_distribution', plot_error_distribution)
         ]
         
+        title_suffix = f" ({data_type.upper()} data)" if data_type else ""
+        
         for plot_name, plot_func in plot_functions:
             try:
-                fig = plot_func(y_true, y_pred, model_name)
+                fig = plot_func(y_true, y_pred, model_name + title_suffix)
                 fig.savefig(model_figures_dir / f'{plot_name}.png')
                 plt.close(fig)
-                self.logger.debug(f"Created {plot_name} plot for {model_name}")
+                self.logger.debug(f"Created {plot_name} plot for {model_key}")
             except Exception as e:
                 self.logger.error(f"Failed to create {plot_name} plot: {str(e)}")
         
         # Feature importance plot
         if 'feature_importance' in results and results['feature_importance'] is not None:
             try:
-                fig = plot_feature_importance(results['feature_importance'], model_name)
+                fig = plot_feature_importance(results['feature_importance'], model_name + title_suffix)
                 fig.savefig(model_figures_dir / 'feature_importance.png')
                 plt.close(fig)
             except Exception as e:
@@ -188,49 +224,173 @@ class ModelEvaluator:
         # Prediction intervals
         try:
             intervals = calculate_prediction_intervals(y_true, y_pred)
-            fig = plot_prediction_intervals(y_true, y_pred, intervals, model_name)
+            fig = plot_prediction_intervals(y_true, y_pred, intervals, model_name + title_suffix)
             fig.savefig(model_figures_dir / 'prediction_intervals.png')
             plt.close(fig)
         except Exception as e:
             self.logger.error(f"Failed to create prediction intervals plot: {str(e)}")
         
-        self.logger.info(f"✓ Generated plots for {model_name}")
+        self.logger.info(f"✓ Generated plots for {model_key}")
     
     def create_comparison_plots(self, all_results: Dict[str, Dict[str, Any]]) -> None:
         """Create plots comparing all models."""
         self.logger.info("\nCreating model comparison plots...")
         
+        if self.comparison_mode:
+            # Create SMOTE vs Regular comparison plots
+            self.create_smote_comparison_plots(all_results)
+        
+        # Create within-data-type comparisons
+        for data_type in self.results_dirs.keys():
+            data_type_results = {k: v for k, v in all_results.items() if k.endswith(f"_{data_type}")}
+            
+            if len(data_type_results) > 1:
+                self.create_data_type_comparison_plots(data_type_results, data_type)
+    
+    def create_smote_comparison_plots(self, all_results: Dict[str, Dict[str, Any]]) -> None:
+        """Create plots specifically comparing SMOTE vs Regular training."""
+        self.logger.info("Creating SMOTE vs Regular comparison plots...")
+        
+        # Extract model names
+        model_names = set()
+        for key in all_results.keys():
+            model_name = key.rsplit('_', 1)[0]
+            model_names.add(model_name)
+        
+        # 1. Performance improvement chart
+        fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+        
+        improvement_data = []
+        for model_name in model_names:
+            smote_key = f"{model_name}_smote"
+            regular_key = f"{model_name}_regular"
+            
+            if smote_key in all_results and regular_key in all_results:
+                smote_metrics = all_results[smote_key]['metrics']
+                regular_metrics = all_results[regular_key]['metrics']
+                
+                # Calculate improvements
+                rmse_imp = (regular_metrics['rmse'] - smote_metrics['rmse']) / regular_metrics['rmse'] * 100
+                r2_imp = (smote_metrics['r2'] - regular_metrics['r2']) / abs(regular_metrics['r2']) * 100
+                mae_imp = (regular_metrics['mae'] - smote_metrics['mae']) / regular_metrics['mae'] * 100
+                
+                improvement_data.append({
+                    'model': model_name,
+                    'RMSE': rmse_imp,
+                    'R²': r2_imp,
+                    'MAE': mae_imp
+                })
+        
+        if improvement_data:
+            imp_df = pd.DataFrame(improvement_data)
+            imp_df.set_index('model').plot(kind='bar', ax=axes[0])
+            axes[0].axhline(y=0, color='black', linestyle='--', alpha=0.5)
+            axes[0].set_title('Performance Improvement with SMOTE (%)', fontsize=14)
+            axes[0].set_ylabel('Improvement (%)')
+            axes[0].legend(title='Metric')
+            axes[0].grid(True, alpha=0.3)
+        
+        # 2. Side-by-side metric comparison
+        comparison_data = []
+        for key, results in all_results.items():
+            parts = key.rsplit('_', 1)
+            comparison_data.append({
+                'Model': parts[0],
+                'Data Type': parts[1].upper(),
+                'RMSE': results['metrics']['rmse'],
+                'MAE': results['metrics']['mae'],
+                'R²': results['metrics']['r2']
+            })
+        
+        if comparison_data:
+            comp_df = pd.DataFrame(comparison_data)
+            
+            # Plot RMSE comparison
+            pivot_rmse = comp_df.pivot(index='Model', columns='Data Type', values='RMSE')
+            pivot_rmse.plot(kind='bar', ax=axes[1])
+            axes[1].set_title('RMSE Comparison: SMOTE vs Regular', fontsize=14)
+            axes[1].set_ylabel('RMSE')
+            axes[1].legend(title='Training Data')
+            axes[1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        fig.savefig(self.figures_dir / 'smote_vs_regular_comparison.png')
+        plt.close(fig)
+        
+        # 3. Create heatmap of all metrics
+        self.create_metrics_heatmap(all_results)
+    
+    def create_metrics_heatmap(self, all_results: Dict[str, Dict[str, Any]]) -> None:
+        """Create a heatmap showing all metrics for all model-data combinations."""
+        metrics_data = []
+        
+        for key, results in all_results.items():
+            parts = key.rsplit('_', 1)
+            model_name = parts[0]
+            data_type = parts[1].upper()
+            
+            row_data = {
+                'Model': f"{model_name} ({data_type})",
+                'RMSE': results['metrics']['rmse'],
+                'MAE': results['metrics']['mae'],
+                'R²': results['metrics']['r2'],
+                'Max Error': results['metrics'].get('max_error', np.nan)
+            }
+            metrics_data.append(row_data)
+        
+        if not metrics_data:
+            return
+        
+        # Create DataFrame and normalize
+        metrics_df = pd.DataFrame(metrics_data).set_index('Model')
+        
+        # Normalize metrics to 0-1 scale for heatmap
+        normalized_df = metrics_df.copy()
+        for col in metrics_df.columns:
+            if col == 'R²':  # Higher is better
+                normalized_df[col] = (metrics_df[col] - metrics_df[col].min()) / (metrics_df[col].max() - metrics_df[col].min())
+            else:  # Lower is better
+                normalized_df[col] = 1 - (metrics_df[col] - metrics_df[col].min()) / (metrics_df[col].max() - metrics_df[col].min())
+        
+        # Create heatmap
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sns.heatmap(normalized_df, annot=metrics_df, fmt='.4f', cmap='RdYlGn', 
+                    cbar_kws={'label': 'Performance (1.0 = Best)'}, ax=ax)
+        ax.set_title('Model Performance Heatmap\n(Normalized: 1.0 = Best Performance)', fontsize=14)
+        plt.tight_layout()
+        fig.savefig(self.figures_dir / 'performance_heatmap.png')
+        plt.close(fig)
+    
+    def create_data_type_comparison_plots(self, results: Dict[str, Dict[str, Any]], data_type: str) -> None:
+        """Create comparison plots for models within a data type."""
         # Prepare comparison data
         comparison_data = []
-        for model_name, results in all_results.items():
-            metrics = results['metrics'].copy()
+        for model_key, model_results in results.items():
+            model_name = model_key.rsplit('_', 1)[0]
+            metrics = model_results['metrics'].copy()
             metrics['model'] = model_name
             comparison_data.append(metrics)
         
         comparison_df = pd.DataFrame(comparison_data)
         
-        # 1. Model Comparison Bar Plot
+        # Create comparison plot
         try:
             fig = plot_model_comparison(comparison_df)
-            fig.savefig(self.figures_dir / 'model_comparison.png')
+            fig.suptitle(f'Model Performance Comparison - {data_type.upper()} Data', fontsize=16)
+            fig.savefig(self.figures_dir / f'model_comparison_{data_type}.png')
             plt.close(fig)
         except Exception as e:
             self.logger.error(f"Failed to create model comparison plot: {str(e)}")
         
-        # 2. Prediction Scatter for All Models
-        self.create_multi_model_scatter(all_results)
+        # Create combined scatter plot
+        self.create_multi_model_scatter(results, data_type)
         
-        # 3. Error Distribution Comparison
-        self.create_error_distribution_comparison(all_results)
-        
-        # 4. Performance Radar Chart
-        self.create_performance_radar(comparison_df)
-        
-        self.logger.info("✓ Created comparison plots")
+        # Create error distribution comparison
+        self.create_error_distribution_comparison(results, data_type)
     
-    def create_multi_model_scatter(self, all_results: Dict[str, Dict[str, Any]]) -> None:
+    def create_multi_model_scatter(self, results: Dict[str, Dict[str, Any]], data_type: str) -> None:
         """Create scatter plots comparing predictions across models."""
-        n_models = len(all_results)
+        n_models = len(results)
         n_cols = min(3, n_models)
         n_rows = (n_models + n_cols - 1) // n_cols
         
@@ -243,13 +403,14 @@ class ModelEvaluator:
         else:
             axes = axes.flatten()
         
-        for idx, (model_name, results) in enumerate(all_results.items()):
+        for idx, (model_key, model_results) in enumerate(results.items()):
             if idx >= len(axes):
                 break
             
             ax = axes[idx]
-            y_true = results['actual']
-            y_pred = results['predictions']
+            model_name = model_key.rsplit('_', 1)[0]
+            y_true = model_results['actual']
+            y_pred = model_results['predictions']
             
             # Scatter plot
             ax.scatter(y_true, y_pred, alpha=0.5, s=30)
@@ -265,107 +426,46 @@ class ModelEvaluator:
             ax.set_title(f'{model_name}')
             
             # Add metrics
-            r2 = results['metrics'].get('r2', 'N/A')
-            rmse = results['metrics'].get('rmse', 'N/A')
+            r2 = model_results['metrics'].get('r2', 'N/A')
+            rmse = model_results['metrics'].get('rmse', 'N/A')
             text = f'R² = {r2:.3f}\nRMSE = {rmse:.3f}' if isinstance(r2, float) else 'Metrics N/A'
             ax.text(0.05, 0.95, text, transform=ax.transAxes, 
                    verticalalignment='top',
                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
         # Hide unused subplots
-        for idx in range(len(all_results), len(axes)):
+        for idx in range(len(results), len(axes)):
             axes[idx].axis('off')
         
-        plt.suptitle('Model Predictions Comparison', fontsize=16)
+        plt.suptitle(f'Model Predictions Comparison - {data_type.upper()} Data', fontsize=16)
         plt.tight_layout()
         
-        fig.savefig(self.figures_dir / 'predictions_comparison.png')
+        fig.savefig(self.figures_dir / f'predictions_comparison_{data_type}.png')
         plt.close(fig)
     
-    def create_error_distribution_comparison(self, all_results: Dict[str, Dict[str, Any]]) -> None:
+    def create_error_distribution_comparison(self, results: Dict[str, Dict[str, Any]], data_type: str) -> None:
         """Create error distribution comparison plot."""
         fig, ax = plt.subplots(figsize=(12, 8))
         
-        for model_name, results in all_results.items():
-            y_true = results['actual']
-            y_pred = results['predictions']
+        for model_key, model_results in results.items():
+            model_name = model_key.rsplit('_', 1)[0]
+            y_true = model_results['actual']
+            y_pred = model_results['predictions']
             errors = y_true - y_pred
             
             # Plot KDE
-            from scipy import stats
             kde = stats.gaussian_kde(errors)
             x_range = np.linspace(errors.min(), errors.max(), 100)
             ax.plot(x_range, kde(x_range), label=model_name, lw=2)
         
         ax.set_xlabel('Prediction Error')
         ax.set_ylabel('Density')
-        ax.set_title('Error Distribution Comparison')
+        ax.set_title(f'Error Distribution Comparison - {data_type.upper()} Data')
         ax.legend()
         ax.grid(True, alpha=0.3)
         ax.axvline(x=0, color='black', linestyle='--', alpha=0.5)
         
-        fig.savefig(self.figures_dir / 'error_distribution_comparison.png')
-        plt.close(fig)
-    
-    def create_performance_radar(self, comparison_df: pd.DataFrame) -> None:
-        """Create radar chart comparing model performance."""
-        from math import pi
-        
-        # Select metrics for radar chart
-        metrics = ['rmse', 'mae', 'r2', 'max_error']
-        available_metrics = [m for m in metrics if m in comparison_df.columns]
-        
-        if len(available_metrics) < 3:
-            self.logger.warning("Not enough metrics for radar chart")
-            return
-        
-        # Normalize metrics (0-1 scale, where 1 is best)
-        normalized_df = comparison_df.copy()
-        for metric in available_metrics:
-            if metric == 'r2':
-                # Higher is better
-                normalized_df[metric] = (comparison_df[metric] - comparison_df[metric].min()) / \
-                                       (comparison_df[metric].max() - comparison_df[metric].min())
-            else:
-                # Lower is better
-                normalized_df[metric] = 1 - (comparison_df[metric] - comparison_df[metric].min()) / \
-                                       (comparison_df[metric].max() - comparison_df[metric].min())
-        
-        # Create radar chart
-        fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(projection='polar'))
-        
-        # Angles for each metric
-        angles = [n / float(len(available_metrics)) * 2 * pi for n in range(len(available_metrics))]
-        angles += angles[:1]
-        
-        # Plot each model
-        for idx, row in normalized_df.iterrows():
-            values = [row[metric] for metric in available_metrics]
-            values += values[:1]
-            
-            ax.plot(angles, values, 'o-', linewidth=2, label=row['model'])
-            ax.fill(angles, values, alpha=0.25)
-        
-        # Fix axis to go in the right order and start at 12 o'clock
-        ax.set_theta_offset(pi / 2)
-        ax.set_theta_direction(-1)
-        
-        # Draw axis lines for each angle and label
-        ax.set_xticks(angles[:-1])
-        ax.set_xticklabels(available_metrics)
-        
-        # Set y-axis limits and labels
-        ax.set_ylim(0, 1)
-        ax.set_yticks([0.2, 0.4, 0.6, 0.8])
-        ax.set_yticklabels(['0.2', '0.4', '0.6', '0.8'])
-        
-        # Add legend and title
-        ax.legend(loc='upper right', bbox_to_anchor=(1.2, 1.1))
-        ax.set_title('Model Performance Comparison\n(Normalized metrics, 1.0 = best)', 
-                    y=1.08, fontsize=14)
-        
-        plt.tight_layout()
-        fig.savefig(self.figures_dir / 'performance_radar.png')
+        fig.savefig(self.figures_dir / f'error_distribution_comparison_{data_type}.png')
         plt.close(fig)
     
     def create_report(self, all_results: Dict[str, Dict[str, Any]], 
@@ -390,71 +490,125 @@ class ModelEvaluator:
         self.logger.info(f"✓ Created metrics report: {report_path}")
     
     def create_markdown_report(self, all_results: Dict[str, Dict[str, Any]]) -> None:
-        """Create markdown evaluation report."""
+        """Create markdown evaluation report with SMOTE comparison."""
         report_path = self.reports_dir / 'evaluation_report.md'
         
         with open(report_path, 'w') as f:
             # Header
-            f.write("# CHF Model Evaluation Report\n\n")
+            f.write("# CHF Model Evaluation Report")
+            if self.comparison_mode:
+                f.write(" - SMOTE vs Regular Comparison")
+            f.write("\n\n")
             f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             
             # Executive Summary
             f.write("## Executive Summary\n\n")
             
-            # Find best models
+            # Find best models overall
             best_rmse = min(all_results.items(), 
                           key=lambda x: x[1]['metrics'].get('rmse', float('inf')))
             best_r2 = max(all_results.items(), 
                         key=lambda x: x[1]['metrics'].get('r2', -float('inf')))
             
-            f.write(f"- **Best RMSE**: {best_rmse[0]} ({best_rmse[1]['metrics']['rmse']:.6f})\n")
-            f.write(f"- **Best R²**: {best_r2[0]} ({best_r2[1]['metrics']['r2']:.6f})\n")
-            f.write(f"- **Total Models Evaluated**: {len(all_results)}\n\n")
+            f.write(f"- **Best RMSE Overall**: {best_rmse[0]} ({best_rmse[1]['metrics']['rmse']:.6f})\n")
+            f.write(f"- **Best R² Overall**: {best_r2[0]} ({best_r2[1]['metrics']['r2']:.6f})\n")
+            f.write(f"- **Total Models Evaluated**: {len(all_results)}\n")
             
-            # Model Details
-            f.write("## Model Performance Details\n\n")
+            if self.comparison_mode:
+                # Find models that benefit most from SMOTE
+                smote_improvements = []
+                for model_name in set(k.rsplit('_', 1)[0] for k in all_results.keys()):
+                    smote_key = f"{model_name}_smote"
+                    regular_key = f"{model_name}_regular"
+                    
+                    if smote_key in all_results and regular_key in all_results:
+                        smote_rmse = all_results[smote_key]['metrics']['rmse']
+                        regular_rmse = all_results[regular_key]['metrics']['rmse']
+                        improvement = (regular_rmse - smote_rmse) / regular_rmse * 100
+                        smote_improvements.append((model_name, improvement))
+                
+                smote_improvements.sort(key=lambda x: x[1], reverse=True)
+                
+                f.write("\n### SMOTE Impact Summary\n\n")
+                f.write("Models ranked by RMSE improvement with SMOTE:\n\n")
+                for model, imp in smote_improvements:
+                    f.write(f"- **{model}**: {imp:+.1f}% improvement\n")
             
-            for model_name, results in sorted(all_results.items()):
-                f.write(f"### {model_name}\n\n")
-                
-                # Metrics table
-                f.write("| Metric | Value |\n")
-                f.write("|--------|-------|\n")
-                
-                metrics = results['metrics']
-                for metric_name, value in sorted(metrics.items()):
-                    if isinstance(value, float):
-                        f.write(f"| {metric_name} | {value:.6f} |\n")
-                
-                f.write("\n")
-                
-                # Plot references
-                f.write("**Plots:**\n")
-                f.write(f"- [Predictions vs Actual](figures/{model_name}/predictions_vs_actual.png)\n")
-                f.write(f"- [Residuals Analysis](figures/{model_name}/residuals.png)\n")
-                f.write(f"- [Error Distribution](figures/{model_name}/error_distribution.png)\n")
-                
-                if 'feature_importance' in results:
-                    f.write(f"- [Feature Importance](figures/{model_name}/feature_importance.png)\n")
-                
-                f.write("\n")
+            # Model Performance Details
+            f.write("\n## Model Performance Details\n\n")
             
-            # Comparison Section
-            f.write("## Model Comparison\n\n")
-            f.write("![Model Comparison](figures/model_comparison.png)\n\n")
-            f.write("![Performance Radar](figures/performance_radar.png)\n\n")
+            # Group by data type
+            for data_type in ['regular', 'smote']:
+                data_type_results = {k: v for k, v in all_results.items() if k.endswith(f"_{data_type}")}
+                
+                if data_type_results:
+                    f.write(f"\n### {data_type.upper()} Data Models\n\n")
+                    
+                    for model_key, results in sorted(data_type_results.items()):
+                        model_name = model_key.rsplit('_', 1)[0]
+                        f.write(f"#### {model_name}\n\n")
+                        
+                        # Metrics table
+                        f.write("| Metric | Value |\n")
+                        f.write("|--------|-------|\n")
+                        
+                        metrics = results['metrics']
+                        for metric_name, value in sorted(metrics.items()):
+                            if isinstance(value, float):
+                                f.write(f"| {metric_name} | {value:.6f} |\n")
+                        
+                        f.write("\n")
+            
+            # Direct SMOTE vs Regular Comparison
+            if self.comparison_mode:
+                f.write("\n## Direct SMOTE vs Regular Comparison\n\n")
+                
+                for model_name in set(k.rsplit('_', 1)[0] for k in all_results.keys()):
+                    smote_key = f"{model_name}_smote"
+                    regular_key = f"{model_name}_regular"
+                    
+                    if smote_key in all_results and regular_key in all_results:
+                        f.write(f"### {model_name}\n\n")
+                        
+                        smote_metrics = all_results[smote_key]['metrics']
+                        regular_metrics = all_results[regular_key]['metrics']
+                        
+                        # Comparison table
+                        f.write("| Metric | Regular | SMOTE | Improvement |\n")
+                        f.write("|--------|---------|-------|-------------|\n")
+                        
+                        for metric in ['rmse', 'mae', 'r2', 'max_error']:
+                            if metric in smote_metrics and metric in regular_metrics:
+                                reg_val = regular_metrics[metric]
+                                smote_val = smote_metrics[metric]
+                                
+                                if metric == 'r2':  # Higher is better
+                                    imp = (smote_val - reg_val) / abs(reg_val) * 100 if reg_val != 0 else 0
+                                else:  # Lower is better
+                                    imp = (reg_val - smote_val) / reg_val * 100 if reg_val != 0 else 0
+                                
+                                f.write(f"| {metric.upper()} | {reg_val:.6f} | {smote_val:.6f} | {imp:+.1f}% |\n")
+                        
+                        f.write("\n")
             
             # Recommendations
-            f.write("## Recommendations\n\n")
-            f.write(f"Based on the evaluation results, **{best_rmse[0]}** shows the best overall ")
-            f.write(f"performance with the lowest RMSE of {best_rmse[1]['metrics']['rmse']:.6f}.\n\n")
+            f.write("\n## Recommendations\n\n")
             
-            # Check for overfitting
-            f.write("### Potential Issues\n\n")
-            for model_name, results in all_results.items():
-                metrics = results['metrics']
-                if 'mean_error' in metrics and abs(metrics['mean_error']) > 0.1:
-                    f.write(f"- **{model_name}**: Shows bias (mean error: {metrics['mean_error']:.6f})\n")
+            if self.comparison_mode:
+                # Recommend based on SMOTE comparison
+                if smote_improvements:
+                    best_improvement = smote_improvements[0]
+                    if best_improvement[1] > 0:
+                        f.write(f"1. **Use SMOTE for {best_improvement[0]}**: Shows {best_improvement[1]:.1f}% improvement\n")
+                    
+                    # Models that don't benefit from SMOTE
+                    no_benefit = [m for m, imp in smote_improvements if imp <= 0]
+                    if no_benefit:
+                        f.write(f"2. **Use regular data for**: {', '.join(no_benefit)} (no improvement with SMOTE)\n")
+            
+            # Overall best model recommendation
+            f.write(f"\n3. **Best Overall Model**: {best_rmse[0].replace('_', ' ').title()} ")
+            f.write(f"(RMSE: {best_rmse[1]['metrics']['rmse']:.6f})")
         
         self.logger.info(f"✓ Created markdown report: {report_path}")
     
@@ -467,7 +621,12 @@ class ModelEvaluator:
             fig = plt.figure(figsize=(8.5, 11))
             fig.text(0.5, 0.7, 'CHF Model Evaluation Report', 
                     ha='center', va='center', fontsize=24, weight='bold')
-            fig.text(0.5, 0.6, f'Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+            
+            if self.comparison_mode:
+                fig.text(0.5, 0.65, 'SMOTE vs Regular Data Comparison',
+                        ha='center', va='center', fontsize=18)
+            
+            fig.text(0.5, 0.55, f'Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
                     ha='center', va='center', fontsize=12)
             fig.text(0.5, 0.5, f'Number of models evaluated: {len(all_results)}',
                     ha='center', va='center', fontsize=12)
@@ -495,7 +654,12 @@ class ModelEvaluator:
                     # Add title based on file path
                     title = plot_file.stem.replace('_', ' ').title()
                     if plot_file.parent != self.figures_dir:
-                        title = f"{plot_file.parent.name} - {title}"
+                        parent_name = plot_file.parent.name
+                        if '_' in parent_name:
+                            model, data_type = parent_name.rsplit('_', 1)
+                            title = f"{model} ({data_type.upper()}) - {title}"
+                        else:
+                            title = f"{parent_name} - {title}"
                     
                     ax.set_title(title, fontsize=14, pad=20)
                     pdf.savefig(fig, bbox_inches='tight')
@@ -521,14 +685,14 @@ class ModelEvaluator:
             self.logger.error("No model results found. Please run test.py first.")
             return
         
-        self.logger.info(f"Found results for {len(all_results)} models")
+        self.logger.info(f"Found results for {len(all_results)} model-data combinations")
         
         # Evaluate each model
-        for model_name, results in all_results.items():
+        for model_key, results in all_results.items():
             try:
-                self.evaluate_single_model(model_name, results)
+                self.evaluate_single_model(model_key, results)
             except Exception as e:
-                self.logger.error(f"Failed to evaluate {model_name}: {str(e)}")
+                self.logger.error(f"Failed to evaluate {model_key}: {str(e)}")
                 self.logger.exception("Detailed traceback:")
         
         # Create comparison plots
@@ -545,7 +709,7 @@ class ModelEvaluator:
             self.logger.error(f"Failed to create report: {str(e)}")
             self.logger.exception("Detailed traceback:")
         
-        self.logger.info("\n✅ Evaluation complete! Check the reports/ directory for outputs.")
+        self.logger.info(f"\n✅ Evaluation complete! Check the {self.reports_dir}/ directory for outputs.")
 
 
 def main():
@@ -555,25 +719,35 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Generate all reports and plots
-  python scripts/evaluate.py
+  # Generate comparison report for both SMOTE and regular models
+  python scripts/evaluate.py --comparison-mode
   
-  # Only generate PNG plots
-  python scripts/evaluate.py --format png
+  # Evaluate only SMOTE models
+  python scripts/evaluate.py --data-type smote
+  
+  # Evaluate only regular models
+  python scripts/evaluate.py --data-type regular
   
   # Generate PDF report only
-  python scripts/evaluate.py --format pdf
+  python scripts/evaluate.py --format pdf --comparison-mode
   
-  # Use custom results directory
-  python scripts/evaluate.py --results-dir custom_results/
+  # Debug mode
+  python scripts/evaluate.py --debug --comparison-mode
         """
     )
     
     parser.add_argument(
-        '--results-dir',
+        '--data-type',
         type=str,
-        default='./results',
-        help='Directory containing model test results'
+        choices=['smote', 'regular', 'both'],
+        default='both',
+        help='Data type to evaluate (default: both)'
+    )
+    
+    parser.add_argument(
+        '--comparison-mode',
+        action='store_true',
+        help='Enable SMOTE vs Regular comparison mode'
     )
     
     parser.add_argument(
@@ -593,7 +767,11 @@ Examples:
     args = parser.parse_args()
     
     # Initialize evaluator
-    evaluator = ModelEvaluator(results_dir=args.results_dir, debug=args.debug)
+    evaluator = ModelEvaluator(
+        debug=args.debug,
+        data_type=args.data_type,
+        comparison_mode=args.comparison_mode or args.data_type == 'both'
+    )
     
     # Run evaluation
     try:
