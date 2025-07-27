@@ -11,8 +11,8 @@ from sklearn.preprocessing import StandardScaler
 class Pinn:
     """Fixed PINN model with proper data handling and differentiable physics."""
     
-    def __init__(self, hidden_size: int = 64, learning_rate: float = 0.001, 
-                 lambda_physics: float = 0.01, **kwargs):  # Reduced default lambda
+    def __init__(self, hidden_size: int = 128, learning_rate: float = 0.0005, 
+                 lambda_physics: float = 0.01, **kwargs):  # Optimized defaults
         """
         Args:
             hidden_size: Neurons per hidden layer.
@@ -39,7 +39,7 @@ class Pinn:
         
         # Physics parameters
         self.debug = kwargs.get('debug', False)
-        self.physics_warmup_epochs = kwargs.get('physics_warmup_epochs', 50)  # Longer warmup
+        self.physics_warmup_epochs = kwargs.get('physics_warmup_epochs', 100)  # Longer warmup
         
         # CHF equation parameters - realistic initial values
         self.chf_param_init = {
@@ -49,6 +49,7 @@ class Pinn:
         }
         self.bowring_params = {}
         self.loss_history = []
+        self.best_loss = float('inf')
 
     def _prepare_data(self, data: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
         """Properly handle data columns and exclude cluster_label."""
@@ -275,8 +276,9 @@ class Pinn:
             
             # Check for numerical issues
             if not torch.isfinite(total_batch_loss):
-                print(f"Warning: Non-finite loss at epoch {self.epoch}, batch {batch_idx}")
-                print(f"Data loss: {data_loss.item()}, Physics loss: {physics_loss.item()}")
+                if self.debug:
+                    print(f"Warning: Non-finite loss at epoch {self.epoch}, batch {batch_idx}")
+                    print(f"Data loss: {data_loss.item()}, Physics loss: {physics_loss.item()}")
                 continue
             
             total_batch_loss.backward()
@@ -325,12 +327,13 @@ class Pinn:
                         sample_target_orig = sample_target
                         phys_pred_orig = phys_pred
                     
-                    print(
-                        f"Sample: P={pressure:.2f}MPa, G={mass_flux:.0f}, x={x_e:.3f} | "
-                        f"Target: {sample_target_orig:.2f} | "
-                        f"Pred: {sample_pred_orig:.2f} | "
-                        f"Physics: {phys_pred_orig:.2f}"
-                    )
+                    if self.debug:
+                        print(
+                            f"Sample: P={pressure:.2f}MPa, G={mass_flux:.0f}, x={x_e:.3f} | "
+                            f"Target: {sample_target_orig:.2f} | "
+                            f"Pred: {sample_pred_orig:.2f} | "
+                            f"Physics: {phys_pred_orig:.2f}"
+                        )
         
         # Calculate averages
         n_batches = len(dataloader)
@@ -341,6 +344,10 @@ class Pinn:
         self.epoch += 1
         self.is_fitted = True
         self.loss_history.append(avg_loss)
+        
+        # Track best loss
+        if avg_loss < self.best_loss:
+            self.best_loss = avg_loss
         
         metrics = {
             'loss': avg_loss,
@@ -427,7 +434,8 @@ class Pinn:
             'target_scaler': pickle.dumps(self.target_scaler),
             'chf_params': chf_params_dict,
             'feature_names': self.feature_names,
-            'loss_history': self.loss_history
+            'loss_history': self.loss_history,
+            'best_loss': self.best_loss
         }
         
         if metadata:
@@ -451,6 +459,7 @@ class Pinn:
             'D_h_mm', 'length_mm', 'geometry_encoded'
         ])
         self.loss_history = checkpoint.get('loss_history', [])
+        self.best_loss = checkpoint.get('best_loss', float('inf'))
         
         # Load scalers
         if 'input_scaler' in checkpoint:
