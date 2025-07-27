@@ -30,8 +30,12 @@ from src.utils import setup_logging, get_logger
 from src.data import (
     download_dataset, 
     preprocess_data,
-    perform_clustering, 
+)
+from src.cluster import (
+    perform_clustering,
     apply_selected_clustering,
+)
+from src.smote import (
     apply_cluster_aware_smote_regression
 )
 from src.plotting import create_eda_plots
