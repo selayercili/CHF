@@ -90,7 +90,7 @@ class ModelTrainer:
         """Load and prepare training data."""
         self.logger.info("Loading training data...")
         
-        train_path = self.dirs['data'] / "train.csv"
+        train_path = self.dirs['data'] / "train_resampled.csv"
         test_path = self.dirs['data'] / "test.csv"
         
         if not train_path.exists():
