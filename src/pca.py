@@ -25,38 +25,6 @@ from src.utils import get_logger
 logger = get_logger(__name__)
 
 
-def clean_for_json(obj):
-    """
-    Clean numpy/pandas objects for JSON serialization.
-    Converts NaN, inf, and numpy types to JSON-compatible types.
-    """
-    if isinstance(obj, dict):
-        return {key: clean_for_json(value) for key, value in obj.items()}
-    elif isinstance(obj, list):
-        return [clean_for_json(item) for item in obj]
-    elif isinstance(obj, np.ndarray):
-        # Convert numpy array to list and clean
-        return clean_for_json(obj.tolist())
-    elif isinstance(obj, (np.integer, np.int64, np.int32)):
-        return int(obj)
-    elif isinstance(obj, (np.floating, np.float64, np.float32)):
-        if np.isnan(obj) or np.isinf(obj):
-            return None
-        return float(obj)
-    elif isinstance(obj, (float, int)):
-        if isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
-            return None
-        return obj
-    elif obj is None:
-        return None
-    else:
-        # Try to convert to string as fallback
-        try:
-            return str(obj)
-        except:
-            return None
-
-
 def determine_optimal_components(
     X: Union[pd.DataFrame, np.ndarray],
     variance_threshold: float = 0.95,
@@ -91,11 +59,6 @@ def determine_optimal_components(
     else:
         max_components = min(max_components, n_features, X_array.shape[0] - 1)
     
-    # Ensure we have enough samples for PCA
-    if max_components <= 0:
-        logger.warning("Not enough samples for PCA, using 1 component")
-        return 1
-    
     # Fit PCA with all possible components
     pca_full = PCA(n_components=max_components)
     pca_full.fit(X_array)
@@ -105,16 +68,12 @@ def determine_optimal_components(
     
     if method == 'cumulative_variance':
         # Find first component where cumulative variance exceeds threshold
-        valid_indices = np.where(cumulative_variance >= variance_threshold)[0]
-        if len(valid_indices) > 0:
-            optimal_components = valid_indices[0] + 1
-        else:
-            # If threshold is too high, use all components
-            optimal_components = max_components
+        optimal_components = np.argmax(cumulative_variance >= variance_threshold) + 1
         logger.info(f"✓ Components for {variance_threshold*100:.1f}% variance: {optimal_components}")
         
     elif method == 'elbow':
         # Use elbow method - find point of maximum curvature
+        # Calculate second derivative to find elbow
         if len(explained_variance_ratio) < 3:
             optimal_components = len(explained_variance_ratio)
         else:
@@ -144,9 +103,8 @@ def determine_optimal_components(
     optimal_components = max(1, min(optimal_components, max_components))
     
     # Log variance explained by optimal number
-    if optimal_components <= len(cumulative_variance):
-        variance_explained = cumulative_variance[optimal_components - 1]
-        logger.info(f"✓ {optimal_components} components explain {variance_explained:.3f} ({variance_explained*100:.1f}%) of variance")
+    variance_explained = cumulative_variance[optimal_components - 1]
+    logger.info(f"✓ {optimal_components} components explain {variance_explained:.3f} ({variance_explained*100:.1f}%) of variance")
     
     return optimal_components
 
@@ -203,11 +161,7 @@ def apply_pca_analysis(
     y = df[target_col] if target_col else None
     
     logger.info(f"✓ Features for PCA: {X.shape[1]} columns, {X.shape[0]} samples")
-    
-    # Check for any issues with the data
-    if X.isnull().any().any():
-        logger.warning("Found NaN values in features, filling with median")
-        X = X.fillna(X.median())
+    logger.info(f"  Feature columns: {feature_columns}")
     
     # Scale features before PCA
     scaler = StandardScaler()
@@ -223,16 +177,13 @@ def apply_pca_analysis(
         )
         
         # Also calculate other methods for comparison
-        try:
-            elbow_components = determine_optimal_components(X_scaled, method='elbow')
-            kaiser_components = determine_optimal_components(X_scaled, method='kaiser')
-            
-            logger.info(f"\n📊 Component Selection Comparison:")
-            logger.info(f"  Cumulative Variance ({variance_threshold*100:.1f}%): {n_components}")
-            logger.info(f"  Elbow Method: {elbow_components}")
-            logger.info(f"  Kaiser Criterion: {kaiser_components}")
-        except Exception as e:
-            logger.warning(f"Could not calculate alternative component methods: {e}")
+        elbow_components = determine_optimal_components(X_scaled, method='elbow')
+        kaiser_components = determine_optimal_components(X_scaled, method='kaiser')
+        
+        logger.info(f"\n📊 Component Selection Comparison:")
+        logger.info(f"  Cumulative Variance ({variance_threshold*100:.1f}%): {n_components}")
+        logger.info(f"  Elbow Method: {elbow_components}")
+        logger.info(f"  Kaiser Criterion: {kaiser_components}")
     
     # Apply PCA
     pca = PCA(n_components=n_components, random_state=42)
@@ -240,18 +191,18 @@ def apply_pca_analysis(
     
     logger.info(f"✓ PCA applied: {X.shape[1]} → {n_components} dimensions")
     
-    # Create results dictionary with proper JSON handling
+    # Create results dictionary
     pca_results = {
-        'original_shape': [int(X.shape[0]), int(X.shape[1])],
-        'pca_shape': [int(X_pca.shape[0]), int(X_pca.shape[1])],
-        'n_components': int(n_components),
+        'original_shape': X.shape,
+        'pca_shape': X_pca.shape,
+        'n_components': n_components,
         'feature_names': feature_columns,
-        'explained_variance_ratio': clean_for_json(pca.explained_variance_ratio_),
-        'cumulative_variance': clean_for_json(np.cumsum(pca.explained_variance_ratio_)),
-        'singular_values': clean_for_json(pca.singular_values_),
-        'components': clean_for_json(pca.components_),
-        'mean': clean_for_json(scaler.mean_),
-        'scale': clean_for_json(scaler.scale_)
+        'explained_variance_ratio': pca.explained_variance_ratio_.tolist(),
+        'cumulative_variance': np.cumsum(pca.explained_variance_ratio_).tolist(),
+        'singular_values': pca.singular_values_.tolist(),
+        'components': pca.components_.tolist(),
+        'mean': scaler.mean_.tolist(),
+        'scale': scaler.scale_.tolist()
     }
     
     # Calculate total variance explained
@@ -268,26 +219,12 @@ def apply_pca_analysis(
         'importance': feature_importance
     }).sort_values('importance', ascending=False)
     
-    # Clean feature importance for JSON
-    pca_results['feature_importance'] = []
-    for _, row in feature_importance_df.iterrows():
-        importance_val = row['importance']
-        # Handle NaN/inf values
-        if pd.isna(importance_val) or np.isinf(importance_val):
-            importance_val = 0.0
-        
-        pca_results['feature_importance'].append({
-            'feature': str(row['feature']),
-            'importance': float(importance_val)
-        })
+    pca_results['feature_importance'] = feature_importance_df.to_dict('records')
     
     # Display top contributing features
     logger.info("Top 10 most important features:")
     for i, row in feature_importance_df.head(10).iterrows():
-        importance_val = row['importance']
-        if pd.isna(importance_val) or np.isinf(importance_val):
-            importance_val = 0.0
-        logger.info(f"  {row['feature']}: {importance_val:.4f}")
+        logger.info(f"  {row['feature']}: {row['importance']:.4f}")
     
     # Component analysis
     logger.info(f"\n📈 Principal Component Analysis:")
@@ -347,28 +284,11 @@ def apply_pca_analysis(
         
         analysis_path = results_dir / 'pca_analysis.json'
         try:
-            # Use the clean_for_json function to ensure valid JSON
-            cleaned_results = clean_for_json(analysis_results)
             with open(analysis_path, 'w') as f:
-                json.dump(cleaned_results, f, indent=2, ensure_ascii=False)
+                json.dump(analysis_results, f, indent=2)
             logger.info(f"✓ PCA analysis results saved: {analysis_path}")
         except Exception as e:
             logger.warning(f"Could not save analysis results as JSON: {e}")
-            # Try to save a minimal version
-            try:
-                minimal_results = {
-                    'original_shape': analysis_results['original_shape'],
-                    'pca_shape': analysis_results['pca_shape'],
-                    'n_components': analysis_results['n_components'],
-                    'explained_variance_ratio': analysis_results['explained_variance_ratio'][:10],  # Limit size
-                    'feature_importance': analysis_results['feature_importance'][:20]  # Top 20 features
-                }
-                cleaned_minimal = clean_for_json(minimal_results)
-                with open(analysis_path, 'w') as f:
-                    json.dump(cleaned_minimal, f, indent=2, ensure_ascii=False)
-                logger.info(f"✓ Minimal PCA analysis results saved: {analysis_path}")
-            except Exception as e2:
-                logger.error(f"Could not save even minimal results: {e2}")
     
     logger.info("✓ PCA analysis completed")
     return pca_results
@@ -414,11 +334,6 @@ def apply_pca_to_test_data() -> pd.DataFrame:
     X_test = test_df[feature_columns]
     target_col = target_columns[0] if target_columns else None
     y_test = test_df[target_col] if target_col else None
-    
-    # Handle missing values in test data
-    if X_test.isnull().any().any():
-        logger.warning("Found NaN values in test features, filling with median")
-        X_test = X_test.fillna(X_test.median())
     
     # Apply same preprocessing and PCA transformation
     X_test_scaled = scaler.transform(X_test)
@@ -510,10 +425,6 @@ def analyze_pca_impact_on_clusters() -> Dict[str, Any]:
     original_features = [col for col in original_df.columns if col not in exclude_cols]
     X_original = original_df[original_features]
     
-    # Handle missing values
-    if X_original.isnull().any().any():
-        X_original = X_original.fillna(X_original.median())
-    
     # Standardize original features
     scaler_original = StandardScaler()
     X_original_scaled = scaler_original.fit_transform(X_original)
@@ -535,19 +446,19 @@ def analyze_pca_impact_on_clusters() -> Dict[str, Any]:
         davies_bouldin_pca = davies_bouldin_score(X_pca, clusters)
         
         results = {
-            'original_dimensions': int(X_original.shape[1]),
-            'pca_dimensions': int(X_pca.shape[1]),
-            'dimension_reduction': float((X_original.shape[1] - X_pca.shape[1]) / X_original.shape[1]),
+            'original_dimensions': X_original.shape[1],
+            'pca_dimensions': X_pca.shape[1],
+            'dimension_reduction': (X_original.shape[1] - X_pca.shape[1]) / X_original.shape[1],
             'metrics': {
                 'original': {
-                    'silhouette_score': float(silhouette_original),
-                    'calinski_harabasz_score': float(calinski_original),
-                    'davies_bouldin_score': float(davies_bouldin_original)
+                    'silhouette_score': silhouette_original,
+                    'calinski_harabasz_score': calinski_original,
+                    'davies_bouldin_score': davies_bouldin_original
                 },
                 'pca': {
-                    'silhouette_score': float(silhouette_pca),
-                    'calinski_harabasz_score': float(calinski_pca),
-                    'davies_bouldin_score': float(davies_bouldin_pca)
+                    'silhouette_score': silhouette_pca,
+                    'calinski_harabasz_score': calinski_pca,
+                    'davies_bouldin_score': davies_bouldin_pca
                 }
             }
         }
@@ -558,9 +469,9 @@ def analyze_pca_impact_on_clusters() -> Dict[str, Any]:
         davies_bouldin_improvement = (davies_bouldin_original - davies_bouldin_pca) / davies_bouldin_original  # Lower is better
         
         results['improvements'] = {
-            'silhouette_improvement_pct': float(silhouette_improvement * 100),
-            'calinski_improvement_pct': float(calinski_improvement * 100),
-            'davies_bouldin_improvement_pct': float(davies_bouldin_improvement * 100)
+            'silhouette_improvement_pct': silhouette_improvement * 100,
+            'calinski_improvement_pct': calinski_improvement * 100,
+            'davies_bouldin_improvement_pct': davies_bouldin_improvement * 100
         }
         
         logger.info(f"\n📊 PCA Impact on Cluster Separation:")
@@ -616,7 +527,7 @@ def create_pca_pipeline(
             test_pca_df = apply_pca_to_test_data()
             pipeline_results['test_transformation'] = {
                 'success': True,
-                'shape': [int(test_pca_df.shape[0]), int(test_pca_df.shape[1])]
+                'shape': test_pca_df.shape
             }
         except Exception as e:
             logger.error(f"Test data transformation failed: {e}")
