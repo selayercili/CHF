@@ -10,10 +10,11 @@ This script handles the complete data pipeline:
 4. Performs clustering analysis
 5. Applies selected clustering to training data
 6. Applies cluster-aware SMOTE
-7. Saves processed data
+7. Applies PCA for dimensionality reduction
+8. Saves processed data
 
 Usage:
-    python scripts/download_and_organize.py [--force-download] [--test-size TEST_SIZE] [--skip-smote]
+    python scripts/download_and_organize.py [--force-download] [--test-size TEST_SIZE] [--skip-smote] [--skip-pca]
 """
 
 import sys
@@ -38,24 +39,31 @@ from src.cluster import (
 from src.smote import (
     apply_cluster_aware_smote_regression
 )
+from src.pca import (
+    create_pca_pipeline,
+    apply_pca_analysis,
+)
 from src.plotting import create_eda_plots
 from src.utils.data_utils import check_data_quality
 
 def main():
     """Main function for data pipeline."""
     parser = argparse.ArgumentParser(
-        description="Download and organize CHF dataset with SMOTE",
+        description="Download and organize CHF dataset with SMOTE and PCA",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Standard pipeline with SMOTE
+  # Standard pipeline with SMOTE and PCA
   python scripts/download_and_organize.py
   
-  # Skip SMOTE application
+  # Skip SMOTE but apply PCA
   python scripts/download_and_organize.py --skip-smote
   
-  # Custom test size and force download
-  python scripts/download_and_organize.py --test-size 0.3 --force-download
+  # Skip both SMOTE and PCA
+  python scripts/download_and_organize.py --skip-smote --skip-pca
+  
+  # Custom test size, force download, and specific variance threshold
+  python scripts/download_and_organize.py --test-size 0.3 --force-download --variance-threshold 0.90
         """
     )
     
@@ -91,11 +99,31 @@ Examples:
     )
     
     parser.add_argument(
+        '--skip-pca',
+        action='store_true',
+        help='Skip PCA application step'
+    )
+    
+    parser.add_argument(
         '--clustering-algorithm',
         type=str,
         choices=['kmeans', 'hierarchical', 'dbscan'],
         default='kmeans',
         help='Clustering algorithm to use (default: kmeans)'
+    )
+    
+    parser.add_argument(
+        '--variance-threshold',
+        type=float,
+        default=0.95,
+        help='PCA variance threshold (default: 0.95 for 95%% variance)'
+    )
+    
+    parser.add_argument(
+        '--pca-components',
+        type=int,
+        default=None,
+        help='Fixed number of PCA components (overrides variance threshold)'
     )
     
     parser.add_argument(
@@ -106,14 +134,21 @@ Examples:
     
     args = parser.parse_args()
     
+    # Validate arguments
+    if args.variance_threshold <= 0 or args.variance_threshold > 1:
+        parser.error("variance-threshold must be between 0 and 1")
+    
+    if args.pca_components is not None and args.pca_components <= 0:
+        parser.error("pca-components must be positive")
+    
     # Setup logging
     log_level = 'DEBUG' if args.debug else 'INFO'
     setup_logging(log_level=log_level)
     logger = get_logger(__name__)
     
-    logger.info("="*60)
-    logger.info("CHF Data Pipeline with SMOTE")
-    logger.info("="*60)
+    logger.info("="*70)
+    logger.info("CHF Data Pipeline with SMOTE and PCA")
+    logger.info("="*70)
     
     # Step 1: Download data
     logger.info("\n=== Step 1: Data Download ===")
@@ -298,10 +333,86 @@ Examples:
         skip_reason = "skipped by user" if args.skip_smote else "clustering not completed"
         logger.info(f"\n=== Step 7: Skipping SMOTE Application ({skip_reason}) ===")
     
+    # Step 8: Apply PCA for dimensionality reduction
+    pca_completed = False
+    if not args.skip_pca:
+        logger.info("\n=== Step 8: Applying PCA for Dimensionality Reduction ===")
+        try:
+            # Determine which data to use for PCA
+            use_smote_data = smote_completed
+            
+            if use_smote_data:
+                logger.info("Using SMOTE-enhanced data for PCA")
+            else:
+                logger.info("Using original training data for PCA")
+            
+            # Apply PCA pipeline
+            if args.pca_components is not None:
+                # Use fixed number of components
+                logger.info(f"Using fixed {args.pca_components} PCA components")
+                pca_results = apply_pca_analysis(
+                    n_components=args.pca_components,
+                    use_smote_data=use_smote_data,
+                    save_results=True
+                )
+            else:
+                # Use complete PCA pipeline with variance threshold
+                logger.info(f"Using PCA pipeline with {args.variance_threshold*100:.1f}% variance threshold")
+                pca_results = create_pca_pipeline(
+                    variance_threshold=args.variance_threshold,
+                    use_smote_data=use_smote_data,
+                    apply_to_test=True
+                )
+                
+                # Extract the main PCA results from pipeline
+                if 'pca_analysis' in pca_results:
+                    pca_analysis = pca_results['pca_analysis']
+                else:
+                    pca_analysis = pca_results
+            
+            # Log PCA results
+            if args.pca_components is not None:
+                pca_analysis = pca_results
+            
+            original_dims = pca_analysis['original_shape'][1]
+            pca_dims = pca_analysis['pca_shape'][1]
+            variance_explained = sum(pca_analysis['explained_variance_ratio'])
+            dimension_reduction = (original_dims - pca_dims) / original_dims
+            
+            logger.info("✓ PCA applied successfully")
+            logger.info(f"  Original dimensions: {original_dims}")
+            logger.info(f"  PCA dimensions: {pca_dims}")
+            logger.info(f"  Dimension reduction: {dimension_reduction*100:.1f}%")
+            logger.info(f"  Variance explained: {variance_explained:.3f} ({variance_explained*100:.1f}%)")
+            
+            # Show top contributing features
+            if 'feature_importance' in pca_analysis:
+                logger.info("  Top 5 most important features:")
+                for i, feature_info in enumerate(pca_analysis['feature_importance'][:5]):
+                    logger.info(f"    {i+1}. {feature_info['feature']}: {feature_info['importance']:.4f}")
+            
+            # Log cluster impact if available
+            if args.pca_components is None and 'cluster_analysis' in pca_results:
+                cluster_analysis = pca_results['cluster_analysis']
+                if 'error' not in cluster_analysis:
+                    silhouette_improvement = cluster_analysis['improvements']['silhouette_improvement_pct']
+                    davies_bouldin_improvement = cluster_analysis['improvements']['davies_bouldin_improvement_pct']
+                    logger.info(f"  Cluster separation impact:")
+                    logger.info(f"    Silhouette score: {silhouette_improvement:+.1f}%")
+                    logger.info(f"    Davies-Bouldin score: {davies_bouldin_improvement:+.1f}%")
+            
+            pca_completed = True
+            
+        except Exception as e:
+            logger.error(f"PCA application failed: {str(e)}")
+            logger.exception("Detailed traceback:")
+    else:
+        logger.info("\n=== Step 8: Skipping PCA Application ===")
+    
     # Summary
-    logger.info("\n" + "="*60)
+    logger.info("\n" + "="*70)
     logger.info("Pipeline Summary")
-    logger.info("="*60)
+    logger.info("="*70)
     logger.info("✓ Data downloaded and organized")
     logger.info(f"✓ Train/test split created (test size: {args.test_size})")
     logger.info("✓ Data preprocessed and encoded")
@@ -315,33 +426,112 @@ Examples:
     if smote_completed:
         logger.info("✓ Cluster-aware SMOTE applied")
     
+    if pca_completed:
+        logger.info("✓ PCA dimensionality reduction applied")
+    
     # Final recommendations
-    logger.info("\n" + "="*50)
-    logger.info("Next Steps")
-    logger.info("="*50)
+    logger.info("\n" + "="*60)
+    logger.info("Next Steps & Available Data")
+    logger.info("="*60)
+    
+    # List available data files
+    available_files = []
+    
+    if pca_completed:
+        pca_train_path = Path('data/pca/pca_transformed_data.csv')
+        pca_test_path = Path('data/pca/pca_test_data.csv')
+        
+        if pca_train_path.exists() and pca_test_path.exists():
+            available_files.append("🎯 PCA-transformed data (recommended for modeling):")
+            available_files.append(f"   • Training: {pca_train_path}")
+            available_files.append(f"   • Test: {pca_test_path}")
+            available_files.append("")
+            available_files.append("🚀 To load PCA data in your model:")
+            available_files.append("   train_df = pd.read_csv('data/pca/pca_transformed_data.csv')")
+            available_files.append("   test_df = pd.read_csv('data/pca/pca_test_data.csv')")
+            available_files.append("")
     
     if smote_completed:
-        logger.info("🎯 Your data is ready for modeling with:")
-        logger.info(f"   • Resampled training data: data/processed/train_resampled.csv")
-        logger.info(f"   • Original training data: data/processed/train.csv") 
-        logger.info(f"   • Test data: data/processed/test.csv")
-        logger.info("\n🚀 To load in your model:")
-        logger.info("   train_df = pd.read_csv('data/processed/train_resampled.csv')")
-        logger.info("   test_df = pd.read_csv('data/processed/test.csv')")
-    elif clustering_completed:
-        logger.info("💡 Run without --skip-smote to apply SMOTE:")
-        logger.info(f"   python scripts/download_and_organize.py --clustering-algorithm {args.clustering_algorithm}")
-        logger.info("🎯 Your clustered data is available at:")
-        logger.info(f"   • Training data: data/processed/train.csv")
-        logger.info(f"   • Test data: data/processed/test.csv")
-    else:
-        logger.info("💡 Run with clustering enabled for SMOTE preparation:")
-        logger.info("   python scripts/download_and_organize.py --clustering-algorithm kmeans")
-        logger.info("🎯 Your preprocessed data is available at:")
-        logger.info(f"   • Training data: data/processed/train.csv")
-        logger.info(f"   • Test data: data/processed/test.csv")
+        available_files.append("💡 SMOTE-enhanced data (if you prefer full dimensionality):")
+        available_files.append("   • Training: data/processed/train_resampled.csv")
+        available_files.append("   • Test: data/processed/test.csv")
+        available_files.append("")
     
-    logger.info("\n✅ Data pipeline completed successfully!")
+    if clustering_completed:
+        available_files.append("📊 Original clustered data:")
+        available_files.append("   • Training: data/processed/train.csv")
+        available_files.append("   • Test: data/processed/test.csv")
+        available_files.append("")
+    
+    if available_files:
+        for line in available_files:
+            logger.info(line)
+    
+    # Provide recommendations based on what was completed
+    logger.info("📋 Recommendations:")
+    
+    if pca_completed:
+        logger.info("   1. Use PCA-transformed data for faster training and potentially better generalization")
+        logger.info("   2. Check feature importance rankings in: data/pca/feature_importance.csv")
+        logger.info("   3. Review PCA analysis results in: data/pca/pca_analysis.json")
+    elif smote_completed:
+        logger.info("   1. Consider running PCA for dimensionality reduction:")
+        logger.info(f"      python scripts/download_and_organize.py --clustering-algorithm {args.clustering_algorithm}")
+        logger.info("   2. Current SMOTE-enhanced data is ready for modeling")
+    elif clustering_completed:
+        logger.info("   1. Consider running with SMOTE and PCA:")
+        logger.info(f"      python scripts/download_and_organize.py --clustering-algorithm {args.clustering_algorithm}")
+        logger.info("   2. Current clustered data is ready for basic modeling")
+    else:
+        logger.info("   1. Run full pipeline for optimal results:")
+        logger.info("      python scripts/download_and_organize.py --clustering-algorithm kmeans")
+    
+    # Additional data files available
+    other_files = []
+    
+    if clustering_completed:
+        other_files.append("🔍 Analysis files available:")
+        other_files.append("   • Clustering: data/clustering/cluster_assignments.csv")
+        other_files.append("   • Clustering metrics: data/clustering/clustering_metrics.json")
+    
+    if pca_completed:
+        other_files.append("   • PCA models: data/pca/pca_model.joblib, data/pca/pca_scaler.joblib")
+    
+    if not args.skip_viz:
+        other_files.append("   • Visualizations: data/plots/ (various EDA plots)")
+    
+    if other_files:
+        logger.info("")
+        for line in other_files:
+            logger.info(line)
+    
+    logger.info(f"\n✅ Data pipeline completed successfully!")
+    
+    # Final statistics
+    final_stats = []
+    if pca_completed:
+        try:
+            pca_train_df = pd.read_csv('data/pca/pca_transformed_data.csv')
+            final_stats.append(f"📈 Final dataset ready for modeling: {pca_train_df.shape}")
+            
+            # Count features vs target/cluster columns
+            feature_cols = [col for col in pca_train_df.columns 
+                          if not any(x in col.lower() for x in ['chf_exp', 'cluster'])]
+            final_stats.append(f"   • Features: {len(feature_cols)} (PCA components)")
+            
+            if any('chf_exp' in col.lower() for col in pca_train_df.columns):
+                final_stats.append("   • Target: 1 (CHF values)")
+            
+            if any('cluster' in col.lower() for col in pca_train_df.columns):
+                final_stats.append("   • Cluster labels: 1 (for analysis)")
+            
+        except:
+            pass
+    
+    if final_stats:
+        logger.info("")
+        for stat in final_stats:
+            logger.info(stat)
 
 if __name__ == "__main__":
     main()
