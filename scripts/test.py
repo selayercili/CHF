@@ -22,6 +22,7 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 import warnings
+import torch
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -232,33 +233,32 @@ class ModelTester:
         except Exception as e:
             self.logger.error(f"Failed to load weights for {model_name}: {str(e)}")
             return None
-        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if hasattr(model, 'to'):
+            model.to(device)
         # Make predictions
         try:
-            # Timer for inference
             import time
             start_time = time.time()
-            
-            # Get predictions
-            predictions = model.predict(test_data)
-            
-            inference_time = time.time() - start_time
-            
-            # Get true values (last column)
+
+            # Ensure input retains column names if needed
+            X_test = test_data.iloc[:, :-1]  # use DataFrame, not NumPy array
             y_true = test_data.iloc[:, -1].values
-            
+
+            predictions = model.predict(X_test)
+
+            inference_time = time.time() - start_time
+
             # Calculate metrics
             metrics = calculate_metrics(y_true, predictions, task='regression')
             metrics['inference_time'] = inference_time
             metrics['samples_per_second'] = len(test_data) / inference_time
-            
-            # Additional metrics
+
             errors = y_true - predictions
             percentiles = [5, 25, 50, 75, 95]
             for p in percentiles:
                 metrics[f'error_p{p}'] = np.percentile(np.abs(errors), p)
-            
-            # Prepare results
+
             results = {
                 'model_name': model_name,
                 'data_type': data_type_label,
@@ -270,23 +270,8 @@ class ModelTester:
                 'test_size': len(test_data),
                 'model_config': self.model_config.get(model_name, {})
             }
-            
-            # Add feature importance if available
-            if hasattr(model, 'get_feature_importance'):
-                try:
-                    results['feature_importance'] = model.get_feature_importance()
-                except:
-                    self.logger.warning(f"Failed to get feature importance for {model_name}")
-            
-            # Log summary metrics
-            self.logger.info(f"Test metrics for {model_name} ({data_type_label}):")
-            self.logger.info(f"  RMSE: {metrics['rmse']:.6f}")
-            self.logger.info(f"  MAE: {metrics['mae']:.6f}")
-            self.logger.info(f"  R²: {metrics['r2']:.6f}")
-            self.logger.info(f"  Inference time: {inference_time:.3f}s ({metrics['samples_per_second']:.1f} samples/s)")
-            
             return results
-            
+
         except Exception as e:
             self.logger.error(f"Error during testing {model_name}: {str(e)}")
             self.logger.exception("Detailed traceback:")
@@ -300,16 +285,16 @@ class ModelTester:
         # Create model results directory
         model_results_dir = results_dir / model_name
         model_results_dir.mkdir(exist_ok=True)
-        
-        # Save predictions as CSV
+
+        epsilon = 1e-8  # to avoid division by zero
         predictions_df = pd.DataFrame({
             'actual': results['actual'],
             'predicted': results['predictions'],
             'error': results['actual'] - results['predictions'],
             'abs_error': np.abs(results['actual'] - results['predictions']),
-            'percent_error': 100 * np.abs(results['actual'] - results['predictions']) / results['actual']
+            'percent_error': 100 * np.abs(results['actual'] - results['predictions']) / (np.abs(results['actual']) + epsilon)
         })
-        
+
         predictions_path = model_results_dir / 'predictions.csv'
         predictions_df.to_csv(predictions_path, index=False)
         self.logger.info(f"Saved predictions to: {predictions_path}")
