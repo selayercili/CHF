@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
-# scripts/test.py
 """
-Model Testing and Evaluation Script with SMOTE/Regular Data Support
-
-This script loads trained models and evaluates them on test data.
-It saves predictions and metrics for further analysis.
-
-Usage:
-    python scripts/test.py [--config CONFIG_PATH] [--models MODEL_NAMES] [--data-type DATA_TYPE] [--weights-type WEIGHTS_TYPE]
+Robust Model Testing Script that handles both PyTorch and non-PyTorch models
 """
 
 import os
@@ -17,7 +10,7 @@ import json
 import pickle
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
@@ -28,610 +21,449 @@ import torch
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
-# Imports after path setup
-from src.utils import (
-    setup_logging, get_logger, load_config,
-    CheckpointManager, MetricsTracker, ConfigManager
-)
-from src.models import model_registry
-from src.utils.metrics import calculate_metrics
-
-# Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+def calculate_metrics(y_true, y_pred):
+    """Calculate regression metrics."""
+    from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+    
+    return {
+        'rmse': np.sqrt(mean_squared_error(y_true, y_pred)),
+        'mae': mean_absolute_error(y_true, y_pred),
+        'r2': r2_score(y_true, y_pred),
+        'max_error': np.max(np.abs(y_true - y_pred)),
+        'mean_error': np.mean(y_true - y_pred),
+        'std_error': np.std(y_true - y_pred)
+    }
 
-class ModelTester:
-    """Handles model testing and evaluation pipeline."""
+class RobustModelTester:
+    """Test script that can handle both PyTorch and traditional ML models."""
     
-    def __init__(self, config_path: Optional[Path] = None, debug: bool = False, data_type: str = 'both'):
-        """
-        Initialize the ModelTester.
-        
-        Args:
-            config_path: Path to configuration file
-            debug: Enable debug logging
-            data_type: Type of models to test ('smote', 'regular', or 'both')
-        """
-        # Setup logging
-        log_level = 'DEBUG' if debug else 'INFO'
-        setup_logging(log_level=log_level)
-        self.logger = get_logger(__name__)
-        
-        # Load configurations
-        self.config_manager = ConfigManager(config_path or Path("configs"))
-        self.model_config = self.config_manager.get('model_configs')
-        
-        # Store data type
+    def __init__(self, data_type: str = 'both', debug: bool = False):
         self.data_type = data_type
+        self.debug = debug
         
-        # Setup directories based on data type
-        self.setup_directories()
-        
-        self.logger.info("="*60)
-        self.logger.info("Model Tester Initialized")
-        self.logger.info(f"Config path: {config_path}")
-        self.logger.info(f"Data type: {data_type}")
-        self.logger.info("="*60)
+        self.setup_paths()
+        self.load_dependencies()
     
-    def setup_directories(self):
-        """Setup directories based on data type."""
+    def setup_paths(self):
+        """Setup directory paths."""
         if self.data_type == 'both':
-            self.weights_dirs = {
-                'smote': Path("weights_smote"),
-                'regular': Path("weights_regular")
-            }
-            self.results_dirs = {
-                'smote': Path("results_smote"),
-                'regular': Path("results_regular")
-            }
+            self.test_configs = [
+                {'data_type': 'smote', 'weights_dir': Path('weights_smote'), 'results_dir': Path('results_smote')},
+                {'data_type': 'regular', 'weights_dir': Path('weights_regular'), 'results_dir': Path('results_regular')}
+            ]
         elif self.data_type == 'smote':
-            self.weights_dirs = {'smote': Path("weights_smote")}
-            self.results_dirs = {'smote': Path("results_smote")}
-        else:  # regular
-            self.weights_dirs = {'regular': Path("weights_regular")}
-            self.results_dirs = {'regular': Path("results_regular")}
+            self.test_configs = [{'data_type': 'smote', 'weights_dir': Path('weights_smote'), 'results_dir': Path('results_smote')}]
+        else:
+            self.test_configs = [{'data_type': 'regular', 'weights_dir': Path('weights_regular'), 'results_dir': Path('results_regular')}]
         
-        # Create results directories
-        for results_dir in self.results_dirs.values():
-            results_dir.mkdir(exist_ok=True)
+        for config in self.test_configs:
+            config['results_dir'].mkdir(exist_ok=True)
         
-        # Data directory
         self.data_dir = Path("data/processed")
+    
+    def load_dependencies(self):
+        """Load model registry and configurations."""
+        try:
+            from src.models import model_registry
+            self.model_registry = model_registry
+            print(f"✅ Model registry loaded: {list(model_registry.keys())}")
+        except Exception as e:
+            print(f"❌ Failed to load model registry: {e}")
+            self.model_registry = {}
+        
+        try:
+            from src.utils import ConfigManager
+            self.config_manager = ConfigManager(Path("configs"))
+            self.model_config = self.config_manager.get('model_configs')
+            print(f"✅ Config loaded")
+        except Exception as e:
+            print(f"⚠️  Config loading failed, using empty config: {e}")
+            self.model_config = {}
     
     def load_test_data(self) -> pd.DataFrame:
         """Load test data."""
-        self.logger.info("Loading test data...")
-        
         test_path = self.data_dir / "test.csv"
-        
         if not test_path.exists():
             raise FileNotFoundError(f"Test data not found: {test_path}")
         
         test_df = pd.read_csv(test_path)
-        self.logger.info(f"Loaded test data: {test_df.shape}")
-        
-        # Data quality check
-        n_missing = test_df.isnull().sum().sum()
-        if n_missing > 0:
-            self.logger.warning(f"Test data contains {n_missing} missing values")
-        
+        print(f"📊 Test data loaded: {test_df.shape}")
         return test_df
     
-    def get_model_instance(self, model_name: str) -> Any:
-        """Get model instance from registry."""
-        if model_name not in model_registry:
-            raise ValueError(f"Unknown model: {model_name}")
+    def find_model_weights(self, model_dir: Path) -> Optional[Tuple[Path, str]]:
+        """Find the best weights file for a model, handling different formats."""
         
-        model_class = model_registry[model_name]
-        model_config = self.model_config.get(model_name, {})
-        init_params = model_config.get('init_params', {})
+        # Priority order for finding weights
+        candidates = [
+            (model_dir / "best_model.pkl", "best_pickle"),
+            (model_dir / "best_model.pth", "best_pytorch"), 
+        ]
         
-        # Special handling for neural networks
-        if model_name in ['neural_network', 'pinn']:
-            if 'architecture' in model_config:
-                arch_config = model_config['architecture']
-                if 'hidden_layers' in arch_config:
-                    init_params['hidden_layers'] = arch_config['hidden_layers']
+        # Add epoch files
+        epoch_pkl_files = list(model_dir.glob("epoch_*.pkl"))
+        epoch_pth_files = list(model_dir.glob("epoch_*.pth"))
         
-        return model_class(**init_params)
-    
-    def find_best_weights(self, model_name: str, weights_dir: Path, weights_type: str = "best") -> Optional[Path]:
-        """
-        Find the best weights file for a model.
+        if epoch_pkl_files:
+            # Sort by epoch number and get latest
+            epoch_pkl_files.sort(key=lambda x: int(x.stem.split('_')[1]))
+            candidates.append((epoch_pkl_files[-1], "latest_pickle"))
         
-        Args:
-            model_name: Name of the model
-            weights_dir: Directory containing weights
-            weights_type: Type of weights to load ("best" or "latest")
-            
-        Returns:
-            Path to weights file or None
-        """
-        model_weights_dir = weights_dir / model_name
+        if epoch_pth_files:
+            # Sort by epoch number and get latest  
+            epoch_pth_files.sort(key=lambda x: int(x.stem.split('_')[1]))
+            candidates.append((epoch_pth_files[-1], "latest_pytorch"))
         
-        if not model_weights_dir.exists():
-            self.logger.warning(f"No weights directory found for {model_name} in {weights_dir}")
-            return None
-        
-        if weights_type == "best":
-            # Look for best_model.pth
-            best_path = model_weights_dir / "best_model.pth"
-            if best_path.exists():
-                return best_path
-            else:
-                self.logger.warning(f"No best_model.pth found for {model_name}, trying latest")
-                weights_type = "latest"
-        
-        if weights_type == "latest":
-            # Find the latest epoch
-            epoch_files = list(model_weights_dir.glob("epoch_*.pth"))
-            if not epoch_files:
-                self.logger.warning(f"No epoch files found for {model_name}")
-                return None
-            
-            # Sort by epoch number
-            epoch_files.sort(key=lambda x: int(x.stem.split('_')[1]))
-            return epoch_files[-1]
+        # Return first existing candidate
+        for weight_path, weight_type in candidates:
+            if weight_path.exists():
+                return weight_path, weight_type
         
         return None
     
-    def test_model(self, model_name: str, test_data: pd.DataFrame, 
-                   weights_dir: Path, results_dir: Path, data_type_label: str,
-                   weights_type: str = "best") -> Optional[Dict[str, Any]]:
-        """
-        Test a single model.
+    def load_model_with_weights(self, model_name: str, weight_path: Path, weight_type: str):
+        """Load model and weights with automatic format detection."""
         
-        Args:
-            model_name: Name of the model to test
-            test_data: Test dataframe
-            weights_dir: Directory containing model weights
-            results_dir: Directory to save results
-            data_type_label: Label for data type ('smote' or 'regular')
-            weights_type: Type of weights to load
+        print(f"      🏋️  Loading {weight_type}: {weight_path.name}")
+        
+        # Create model instance first
+        model_class = self.model_registry[model_name]
+        model_config = self.model_config.get(model_name, {})
+        init_params = model_config.get('init_params', {})
+        
+        # Handle neural network architectures
+        if model_name in ['neural_network', 'pinn'] and 'architecture' in model_config:
+            arch_config = model_config['architecture']
+            if 'hidden_layers' in arch_config:
+                init_params['hidden_layers'] = arch_config['hidden_layers']
+        
+        # Load the weights/model
+        if 'pickle' in weight_type:
+            # Pickle format - load entire checkpoint
+            with open(weight_path, 'rb') as f:
+                checkpoint = pickle.load(f)
             
-        Returns:
-            Dictionary containing predictions and metrics
-        """
-        self.logger.info(f"\nTesting {model_name} (trained on {data_type_label.upper()} data)...")
+            if isinstance(checkpoint, dict) and 'model' in checkpoint:
+                # Checkpoint format
+                model = checkpoint['model']
+                print(f"         ✅ Loaded from pickle checkpoint")
+            else:
+                # Direct model
+                model = checkpoint
+                print(f"         ✅ Loaded direct pickle model")
+                
+        elif 'pytorch' in weight_type:
+            # PyTorch format
+            try:
+                checkpoint = torch.load(weight_path, map_location='cpu', weights_only=False)
+                
+                if isinstance(checkpoint, dict):
+                    if 'model' in checkpoint:
+                        # Full model in checkpoint
+                        model = checkpoint['model']
+                        print(f"         ✅ Loaded full model from PyTorch checkpoint")
+                    else:
+                        # Need to load state dict
+                        model = model_class(**init_params)
+                        if 'model_state_dict' in checkpoint and hasattr(model, 'load_state_dict'):
+                            model.load_state_dict(checkpoint['model_state_dict'])
+                            print(f"         ✅ Loaded state dict to new model instance")
+                        else:
+                            print(f"         ⚠️  Could not load state dict, using new instance")
+                else:
+                    # Direct model
+                    model = checkpoint
+                    print(f"         ✅ Loaded direct PyTorch model")
+                    
+            except Exception as e:
+                print(f"         ❌ PyTorch loading failed: {e}")
+                # Fallback: try as pickle even though extension is .pth
+                try:
+                    with open(weight_path, 'rb') as f:
+                        checkpoint = pickle.load(f)
+                    
+                    if isinstance(checkpoint, dict) and 'model' in checkpoint:
+                        model = checkpoint['model']
+                    else:
+                        model = checkpoint
+                    print(f"         ✅ Loaded as pickle despite .pth extension")
+                except:
+                    raise e
+        else:
+            raise ValueError(f"Unknown weight type: {weight_type}")
+        
+        # Move PyTorch models to appropriate device
+        if hasattr(model, 'to') and hasattr(model, 'parameters'):
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model.to(device)
+            print(f"         📱 Moved to {device}")
+        
+        return model
+    
+    def make_predictions(self, model, X_test):
+        """Make predictions with different model types."""
+        
+        if hasattr(model, 'predict'):
+            # Standard sklearn-like interface
+            return model.predict(X_test)
+            
+        elif hasattr(model, 'forward') or hasattr(model, '__call__'):
+            # PyTorch model
+            model.eval() if hasattr(model, 'eval') else None
+            
+            with torch.no_grad():
+                # Convert to tensor if needed
+                if isinstance(X_test, pd.DataFrame):
+                    X_tensor = torch.FloatTensor(X_test.values)
+                else:
+                    X_tensor = torch.FloatTensor(X_test)
+                
+                # Move to same device as model
+                if hasattr(model, 'parameters') and next(model.parameters(), None) is not None:
+                    device = next(model.parameters()).device
+                    X_tensor = X_tensor.to(device)
+                
+                # Make prediction
+                if hasattr(model, 'forward'):
+                    predictions = model.forward(X_tensor)
+                else:
+                    predictions = model(X_tensor)
+                
+                # Convert back to numpy
+                predictions = predictions.cpu().numpy()
+                
+                # Handle different output shapes
+                if predictions.ndim > 1:
+                    predictions = predictions.squeeze()
+                
+                return predictions
+        else:
+            raise AttributeError(f"Model has no predict or forward method: {type(model)}")
+    
+    def test_single_model(self, model_name: str, test_data: pd.DataFrame,
+                         weights_dir: Path, results_dir: Path, data_type_label: str) -> Optional[Dict[str, Any]]:
+        """Test a single model."""
+        print(f"   🧪 Testing {model_name}...")
+        
+        model_dir = weights_dir / model_name
+        if not model_dir.exists():
+            print(f"      ❌ Model directory not found: {model_dir}")
+            return None
         
         # Find weights
-        weights_path = self.find_best_weights(model_name, weights_dir, weights_type)
-        if weights_path is None:
-            self.logger.error(f"No weights found for {model_name} in {weights_dir}")
+        weight_info = self.find_model_weights(model_dir)
+        if weight_info is None:
+            print(f"      ❌ No weights found in {model_dir}")
+            if self.debug:
+                files = list(model_dir.iterdir())
+                print(f"         Available files: {[f.name for f in files]}")
             return None
         
-        self.logger.info(f"Loading weights from: {weights_path}")
+        weight_path, weight_type = weight_info
         
-        # Create model instance
         try:
-            model = self.get_model_instance(model_name)
-        except Exception as e:
-            self.logger.error(f"Failed to create model {model_name}: {str(e)}")
-            return None
-        
-        # Load weights
-        try:
-            if hasattr(model, 'load'):
-                # Model has custom load method
-                metadata = model.load(weights_path)
-                self.logger.info(f"Loaded model from epoch: {model.epoch if hasattr(model, 'epoch') else 'unknown'}")
-            else:
-                # Generic loading
-                import torch    
-                checkpoint = torch.load(weights_path, map_location='cpu', weights_only=False)
-                
-                if 'model_state_dict' in checkpoint:
-                    model.load_state_dict(checkpoint['model_state_dict'])
-                elif 'model' in checkpoint:
-                    model = checkpoint['model']
-                else:
-                    self.logger.error(f"Unknown checkpoint format for {model_name}")
-                    return None
-                
-                metadata = checkpoint.get('metadata', {})
-        
-        except Exception as e:
-            self.logger.error(f"Failed to load weights for {model_name}: {str(e)}")
-            return None
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if hasattr(model, 'to'):
-            model.to(device)
-        # Make predictions
-        try:
-            import time
-            start_time = time.time()
-
-            # Ensure input retains column names if needed
-            X_test = test_data.iloc[:, :-1]  # use DataFrame, not NumPy array
+            # Load model
+            model = self.load_model_with_weights(model_name, weight_path, weight_type)
+            
+            # Prepare test data
+            X_test = test_data.iloc[:, :-1]
             y_true = test_data.iloc[:, -1].values
-
-            predictions = model.predict(X_test)
-
-            inference_time = time.time() - start_time
-
+            
+            # Make predictions
+            start_time = datetime.now()
+            predictions = self.make_predictions(model, X_test)
+            inference_time = (datetime.now() - start_time).total_seconds()
+            
             # Calculate metrics
-            metrics = calculate_metrics(y_true, predictions, task='regression')
+            metrics = calculate_metrics(y_true, predictions)
             metrics['inference_time'] = inference_time
             metrics['samples_per_second'] = len(test_data) / inference_time
-
-            errors = y_true - predictions
-            percentiles = [5, 25, 50, 75, 95]
-            for p in percentiles:
-                metrics[f'error_p{p}'] = np.percentile(np.abs(errors), p)
-
-            results = {
+            
+            print(f"      ✅ RMSE: {metrics['rmse']:.6f}, R²: {metrics['r2']:.6f}")
+            
+            return {
                 'model_name': model_name,
                 'data_type': data_type_label,
-                'weights_path': str(weights_path),
+                'weight_type': weight_type,
                 'timestamp': datetime.now().isoformat(),
                 'metrics': metrics,
-                'predictions': predictions,
-                'actual': y_true,
-                'test_size': len(test_data),
-                'model_config': self.model_config.get(model_name, {})
+                'predictions': predictions.tolist() if hasattr(predictions, 'tolist') else list(predictions),
+                'actual': y_true.tolist(),
+                'test_size': len(test_data)
             }
-            return results
-
+            
         except Exception as e:
-            self.logger.error(f"Error during testing {model_name}: {str(e)}")
-            self.logger.exception("Detailed traceback:")
+            print(f"      ❌ Failed: {e}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
             return None
     
-    def save_results(self, results: Dict[str, Any], model_name: str, results_dir: Path) -> None:
-        """Save test results and predictions."""
-        if results is None:
+    def save_results(self, results: Dict[str, Any], results_dir: Path):
+        """Save test results."""
+        if not results:
             return
         
-        # Create model results directory
+        model_name = results['model_name']
         model_results_dir = results_dir / model_name
         model_results_dir.mkdir(exist_ok=True)
-
-        epsilon = 1e-8  # to avoid division by zero
+        
+        # Save predictions
         predictions_df = pd.DataFrame({
             'actual': results['actual'],
             'predicted': results['predictions'],
-            'error': results['actual'] - results['predictions'],
-            'abs_error': np.abs(results['actual'] - results['predictions']),
-            'percent_error': 100 * np.abs(results['actual'] - results['predictions']) / (np.abs(results['actual']) + epsilon)
+            'error': np.array(results['actual']) - np.array(results['predictions']),
+            'abs_error': np.abs(np.array(results['actual']) - np.array(results['predictions']))
         })
-
-        predictions_path = model_results_dir / 'predictions.csv'
-        predictions_df.to_csv(predictions_path, index=False)
-        self.logger.info(f"Saved predictions to: {predictions_path}")
         
-        # Save metrics as JSON
+        predictions_df.to_csv(model_results_dir / 'predictions.csv', index=False)
+        
+        # Save metrics
         metrics_data = {
             'model_name': results['model_name'],
             'data_type': results['data_type'],
-            'weights_path': results['weights_path'],
+            'weight_type': results['weight_type'],
             'timestamp': results['timestamp'],
             'metrics': results['metrics'],
             'test_size': results['test_size']
         }
         
-        metrics_path = model_results_dir / 'metrics.json'
-        with open(metrics_path, 'w') as f:
+        with open(model_results_dir / 'metrics.json', 'w') as f:
             json.dump(metrics_data, f, indent=2)
-        self.logger.info(f"Saved metrics to: {metrics_path}")
-        
-        # Save feature importance if available
-        if 'feature_importance' in results and results['feature_importance'] is not None:
-            importance_path = model_results_dir / 'feature_importance.csv'
-            results['feature_importance'].to_csv(importance_path, index=False)
-            self.logger.info(f"Saved feature importance to: {importance_path}")
-        
-        # Save full results as pickle
-        results_pickle_path = model_results_dir / 'full_results.pkl'
-        with open(results_pickle_path, 'wb') as f:
-            pickle.dump(results, f)
-        
-        # Save summary statistics
-        summary_stats = {
-            'data_type': results['data_type'],
-            'prediction_stats': {
-                'mean': float(predictions_df['predicted'].mean()),
-                'std': float(predictions_df['predicted'].std()),
-                'min': float(predictions_df['predicted'].min()),
-                'max': float(predictions_df['predicted'].max())
-            },
-            'error_stats': {
-                'mean_error': float(predictions_df['error'].mean()),
-                'mean_abs_error': float(predictions_df['abs_error'].mean()),
-                'mean_percent_error': float(predictions_df['percent_error'].mean()),
-                'std_error': float(predictions_df['error'].std())
-            }
-        }
-        
-        summary_path = model_results_dir / 'summary_stats.json'
-        with open(summary_path, 'w') as f:
-            json.dump(summary_stats, f, indent=2)
     
-    def test_all_models(self, model_names: Optional[List[str]] = None,
-                       weights_type: str = "best") -> Dict[str, Any]:
-        """
-        Test all specified models.
-        
-        Args:
-            model_names: List of model names to test (None for all)
-            weights_type: Type of weights to load
-            
-        Returns:
-            Dictionary of all results
-        """
-        # Load test data once
+    def test_all_models(self, model_names: Optional[List[str]] = None):
+        """Test all available models."""
         test_data = self.load_test_data()
-        
-        # Test each model for each data type
         all_results = {}
         
-        for data_type_label, weights_dir in self.weights_dirs.items():
-            results_dir = self.results_dirs[data_type_label]
+        for config in self.test_configs:
+            data_type = config['data_type']
+            weights_dir = config['weights_dir']
+            results_dir = config['results_dir']
             
-            self.logger.info(f"\n{'='*60}")
-            self.logger.info(f"Testing models trained on {data_type_label.upper()} data")
-            self.logger.info(f"{'='*60}")
+            print(f"\n{'='*60}")
+            print(f"Testing {data_type.upper()} models from {weights_dir}")
+            print(f"{'='*60}")
             
-            # Get list of models to test
-            if model_names is None:
-                # Find models with saved weights
-                found_models = []
-                if weights_dir.exists():
-                    for model_dir in weights_dir.iterdir():
-                        if model_dir.is_dir() and model_dir.name in model_registry:
-                            found_models.append(model_dir.name)
-                model_names_to_test = found_models
-            else:
-                model_names_to_test = model_names
+            if not weights_dir.exists():
+                print(f"⚠️  Weights directory not found: {weights_dir}")
+                continue
             
-            self.logger.info(f"Found {len(model_names_to_test)} models to test: {model_names_to_test}")
+            # Find available models
+            model_dirs = [d for d in weights_dir.iterdir() if d.is_dir()]
+            available_models = [d.name for d in model_dirs if d.name in self.model_registry]
+            
+            if model_names:
+                available_models = [m for m in available_models if m in model_names]
+            
+            if not available_models:
+                print(f"⚠️  No models found")
+                continue
+            
+            print(f"📋 Testing {len(available_models)} models: {available_models}")
             
             # Test each model
-            for model_name in tqdm(model_names_to_test, desc=f"Testing {data_type_label} models"):
+            for model_name in tqdm(available_models, desc=f"Testing {data_type} models"):
                 try:
-                    results = self.test_model(
-                        model_name, test_data, weights_dir, results_dir, 
-                        data_type_label, weights_type
+                    results = self.test_single_model(
+                        model_name, test_data, weights_dir, results_dir, data_type
                     )
+                    
                     if results:
-                        # Key includes both model name and data type
-                        result_key = f"{model_name}_{data_type_label}"
-                        all_results[result_key] = results
-                        self.save_results(results, model_name, results_dir)
+                        key = f"{model_name}_{data_type}"
+                        all_results[key] = results
+                        self.save_results(results, results_dir)
+                        
                 except KeyboardInterrupt:
-                    self.logger.warning("Testing interrupted by user")
+                    print("\n⚠️  Testing interrupted")
                     break
                 except Exception as e:
-                    self.logger.error(f"Failed to test {model_name}: {str(e)}")
-                    continue
+                    print(f"   ❌ Error testing {model_name}: {e}")
+                    if self.debug:
+                        import traceback
+                        traceback.print_exc()
             
-            # Save comparison summary for this data type
-            self.save_comparison_summary(
-                {k: v for k, v in all_results.items() if k.endswith(f"_{data_type_label}")},
-                results_dir,
-                data_type_label
+            # Save comparison
+            self.save_comparison(
+                {k: v for k, v in all_results.items() if k.endswith(f"_{data_type}")},
+                results_dir
             )
         
-        # If testing both, create combined comparison
         if self.data_type == 'both':
             self.save_combined_comparison(all_results)
         
-        self.logger.info("\n" + "="*60)
-        self.logger.info("TESTING COMPLETED")
-        self.logger.info("="*60)
-        
         return all_results
     
-    def save_comparison_summary(self, results: Dict[str, Dict[str, Any]], 
-                               results_dir: Path, data_type_label: str) -> None:
-        """Save summary comparison of models for a specific data type."""
+    def save_comparison(self, results: Dict[str, Any], results_dir: Path):
+        """Save model comparison."""
         if not results:
             return
         
-        # Create comparison data
         comparison_data = []
-        
-        for result_key, result in results.items():
-            row = {
-                'model': result['model_name'],
-                'data_type': data_type_label,
-                'timestamp': result['timestamp'],
-                **result['metrics']
-            }
-            comparison_data.append(row)
-        
-        # Save as CSV
-        comparison_df = pd.DataFrame(comparison_data)
-        comparison_path = results_dir / 'model_comparison.csv'
-        comparison_df.to_csv(comparison_path, index=False)
-        self.logger.info(f"Saved {data_type_label} model comparison to: {comparison_path}")
-        
-        # Save as markdown
-        markdown_path = results_dir / 'model_comparison.md'
-        with open(markdown_path, 'w') as f:
-            f.write(f"# Model Comparison Results - {data_type_label.upper()} Data\n\n")
-            f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            
-            # Sort by RMSE
-            comparison_df = comparison_df.sort_values('rmse')
-            
-            # Key metrics table
-            f.write("## Key Metrics\n\n")
-            key_metrics = ['rmse', 'mae', 'r2', 'max_error']
-            available_metrics = [m for m in key_metrics if m in comparison_df.columns]
-            
-            if available_metrics:
-                subset_df = comparison_df[['model'] + available_metrics]
-                f.write(subset_df.to_markdown(index=False))
-            
-            f.write("\n\n## Best Performing Models\n\n")
-            f.write(f"- **Lowest RMSE**: {comparison_df.iloc[0]['model']} ({comparison_df.iloc[0]['rmse']:.6f})\n")
-            
-            if 'mae' in comparison_df.columns:
-                best_mae = comparison_df.loc[comparison_df['mae'].idxmin()]
-                f.write(f"- **Lowest MAE**: {best_mae['model']} ({best_mae['mae']:.6f})\n")
-            
-            if 'r2' in comparison_df.columns:
-                best_r2 = comparison_df.loc[comparison_df['r2'].idxmax()]
-                f.write(f"- **Highest R²**: {best_r2['model']} ({best_r2['r2']:.6f})\n")
-        
-        # Print summary to console
-        self.logger.info(f"\nModel Comparison Summary ({data_type_label.upper()}):")
-        print(comparison_df[['model', 'rmse', 'mae', 'r2']].to_string(index=False))
-    
-    def save_combined_comparison(self, all_results: Dict[str, Dict[str, Any]]) -> None:
-        """Save combined comparison of all models across data types."""
-        if not all_results:
-            return
-        
-        # Create combined results directory
-        combined_dir = Path("results") / "combined_comparison"
-        combined_dir.mkdir(exist_ok=True)
-        
-        # Create comparison data
-        comparison_data = []
-        
-        for result_key, result in all_results.items():
+        for key, result in results.items():
             row = {
                 'model': result['model_name'],
                 'data_type': result['data_type'],
-                'timestamp': result['timestamp'],
+                'weight_type': result['weight_type'],
                 **result['metrics']
             }
             comparison_data.append(row)
         
-        # Save as CSV
+        comparison_df = pd.DataFrame(comparison_data)
+        comparison_df = comparison_df.sort_values('rmse')
+        
+        comparison_path = results_dir / 'model_comparison.csv'
+        comparison_df.to_csv(comparison_path, index=False)
+        
+        print(f"\n📊 Results saved to: {comparison_path}")
+        print(comparison_df[['model', 'rmse', 'mae', 'r2', 'weight_type']].to_string(index=False))
+    
+    def save_combined_comparison(self, all_results: Dict[str, Any]):
+        """Save combined comparison."""
+        combined_dir = Path("results") / "combined_comparison"
+        combined_dir.mkdir(exist_ok=True)
+        
+        comparison_data = []
+        for key, result in all_results.items():
+            row = {
+                'model': result['model_name'],
+                'data_type': result['data_type'],
+                'weight_type': result['weight_type'],
+                **result['metrics']
+            }
+            comparison_data.append(row)
+        
         comparison_df = pd.DataFrame(comparison_data)
         comparison_path = combined_dir / 'all_models_comparison.csv'
         comparison_df.to_csv(comparison_path, index=False)
-        self.logger.info(f"Saved combined comparison to: {comparison_path}")
         
-        # Create comparison report
-        report_path = combined_dir / 'comparison_report.md'
-        with open(report_path, 'w') as f:
-            f.write("# Combined Model Comparison - SMOTE vs Regular Data\n\n")
-            f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            
-            # Overall best model
-            f.write("## Overall Best Model\n\n")
-            best_overall = comparison_df.loc[comparison_df['rmse'].idxmin()]
-            f.write(f"**{best_overall['model']} ({best_overall['data_type'].upper()})** - RMSE: {best_overall['rmse']:.6f}\n\n")
-            
-            # Comparison by model
-            f.write("## Model Performance: SMOTE vs Regular\n\n")
-            
-            for model_name in comparison_df['model'].unique():
-                f.write(f"### {model_name}\n\n")
-                model_data = comparison_df[comparison_df['model'] == model_name]
-                
-                if len(model_data) == 2:  # Both SMOTE and regular
-                    smote_data = model_data[model_data['data_type'] == 'smote'].iloc[0]
-                    regular_data = model_data[model_data['data_type'] == 'regular'].iloc[0]
-                    
-                    # Calculate improvements
-                    rmse_improvement = (regular_data['rmse'] - smote_data['rmse']) / regular_data['rmse'] * 100
-                    r2_improvement = (smote_data['r2'] - regular_data['r2']) / abs(regular_data['r2']) * 100
-                    
-                    f.write("| Metric | Regular | SMOTE | Improvement |\n")
-                    f.write("|--------|---------|-------|-------------|\n")
-                    f.write(f"| RMSE | {regular_data['rmse']:.6f} | {smote_data['rmse']:.6f} | {rmse_improvement:+.1f}% |\n")
-                    f.write(f"| MAE | {regular_data['mae']:.6f} | {smote_data['mae']:.6f} | - |\n")
-                    f.write(f"| R² | {regular_data['r2']:.6f} | {smote_data['r2']:.6f} | {r2_improvement:+.1f}% |\n")
-                    f.write("\n")
-            
-            # Summary statistics
-            f.write("## Summary Statistics\n\n")
-            summary = comparison_df.groupby('data_type')[['rmse', 'mae', 'r2']].agg(['mean', 'std'])
-            f.write(summary.to_markdown())
-
+        print(f"\n🏆 Combined results saved to: {comparison_path}")
 
 def main():
-    """Main entry point for the testing script."""
-    parser = argparse.ArgumentParser(
-        description="Test and evaluate trained CHF models",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Test all models (both SMOTE and regular)
-  python scripts/test.py --data-type both
-  
-  # Test only SMOTE-trained models
-  python scripts/test.py --data-type smote
-  
-  # Test only regular-trained models
-  python scripts/test.py --data-type regular
-  
-  # Test specific models
-  python scripts/test.py --models xgboost lightgbm --data-type both
-  
-  # Use latest weights instead of best
-  python scripts/test.py --weights-type latest
-  
-  # Debug mode
-  python scripts/test.py --debug
-        """
-    )
-    
-    parser.add_argument(
-        '--config',
-        type=str,
-        default='configs',
-        help='Path to configuration directory'
-    )
-    
-    parser.add_argument(
-        '--models',
-        nargs='+',
-        type=str,
-        help='Specific models to test (default: all with weights)'
-    )
-    
-    parser.add_argument(
-        '--data-type',
-        type=str,
-        choices=['smote', 'regular', 'both'],
-        default='both',
-        help='Test models trained on SMOTE, regular, or both data types (default: both)'
-    )
-    
-    parser.add_argument(
-        '--weights-type',
-        type=str,
-        choices=['best', 'latest'],
-        default='best',
-        help='Type of weights to load'
-    )
-    
-    parser.add_argument(
-        '--debug',
-        action='store_true',
-        help='Enable debug logging'
-    )
+    parser = argparse.ArgumentParser(description="Test trained models with robust format handling")
+    parser.add_argument('--models', nargs='+', help='Specific models to test')
+    parser.add_argument('--data-type', choices=['smote', 'regular', 'both'], 
+                       default='both', help='Data type to test')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     
     args = parser.parse_args()
     
-    # Initialize tester
-    config_path = Path(args.config)
-    tester = ModelTester(
-        config_path=config_path, 
-        debug=args.debug,
-        data_type=args.data_type
-    )
+    print("🧪 STARTING ROBUST MODEL TESTING")
+    print("=" * 60)
     
-    # Run testing
     try:
-        tester.test_all_models(
-            model_names=args.models,
-            weights_type=args.weights_type
-        )
-    except KeyboardInterrupt:
-        tester.logger.warning("\nTesting interrupted by user")
-        sys.exit(1)
+        tester = RobustModelTester(data_type=args.data_type, debug=args.debug)
+        results = tester.test_all_models(model_names=args.models)
+        
+        print(f"\n✅ Testing completed! Tested {len(results)} model configurations.")
+        
     except Exception as e:
-        tester.logger.error(f"Testing failed: {str(e)}")
+        print(f"\n❌ Testing failed: {e}")
         if args.debug:
-            tester.logger.exception("Detailed traceback:")
+            import traceback
+            traceback.print_exc()
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
