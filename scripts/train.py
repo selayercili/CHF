@@ -14,10 +14,13 @@ import os
 import sys
 import argparse
 import logging
+import json
+import pickle
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 import warnings
+import pandas as pd
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -177,6 +180,96 @@ class ModelTrainer:
         
         return model
     
+    def save_training_results(self, model_name: str, results: Dict[str, Any], 
+                            model: Any, metrics_tracker: MetricsTracker) -> None:
+        """
+        Save training results to the results directory.
+        
+        Args:
+            model_name: Name of the model
+            results: Training results dictionary
+            model: Trained model instance
+            metrics_tracker: Metrics tracker instance
+        """
+        # Create model-specific results directory
+        model_results_dir = self.dirs['results'] / model_name
+        model_results_dir.mkdir(exist_ok=True)
+        
+        # Save results summary as JSON
+        results_file = model_results_dir / f"training_results_{self.data_type}.json"
+        
+        # Prepare serializable results
+        serializable_results = {
+            'model_name': results['model_name'],
+            'data_type': results['data_type'],
+            'epochs_trained': results['epochs_trained'],
+            'best_val_loss': float(results['best_val_loss']) if results['best_val_loss'] != float('inf') else None,
+            'training_time': results['training_time'],
+            'training_time_formatted': f"{results['training_time']/60:.2f} minutes",
+            'timestamp': datetime.now().isoformat(),
+            'config_used': self.model_config.get(model_name, {}),
+            'data_shapes': results.get('data_shapes', {}),
+            'final_metrics': results.get('final_metrics', {})
+        }
+        
+        # Add metrics summary if available
+        if results.get('metrics_summary'):
+            # Convert any numpy types to native Python types
+            metrics_summary = {}
+            for key, value in results['metrics_summary'].items():
+                if hasattr(value, 'item'):  # numpy scalar
+                    metrics_summary[key] = value.item()
+                elif isinstance(value, (list, tuple)):
+                    metrics_summary[key] = [v.item() if hasattr(v, 'item') else v for v in value]
+                else:
+                    metrics_summary[key] = value
+            serializable_results['metrics_summary'] = metrics_summary
+        
+        # Save JSON results
+        with open(results_file, 'w') as f:
+            json.dump(serializable_results, f, indent=2)
+        
+        self.logger.info(f"Results saved to: {results_file}")
+        
+        # Save training history as CSV if available
+        history_data = metrics_tracker.get_history()
+        if history_data:
+            history_file = model_results_dir / f"training_history_{self.data_type}.csv"
+            
+            # Convert to DataFrame and save
+            try:
+                df = pd.DataFrame(history_data)
+                df.to_csv(history_file, index=False)
+                self.logger.info(f"Training history saved to: {history_file}")
+            except Exception as e:
+                self.logger.warning(f"Could not save training history: {e}")
+        
+        # Save model parameters/info
+        model_info_file = model_results_dir / f"model_info_{self.data_type}.json"
+        model_info = {
+            'model_class': model.__class__.__name__,
+            'model_type': model_name,
+            'data_type': self.data_type,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Try to get model-specific info
+        try:
+            if hasattr(model, 'get_params'):
+                model_info['parameters'] = model.get_params()
+            if hasattr(model, 'feature_importances_'):
+                # Convert numpy arrays to lists for JSON serialization
+                model_info['feature_importances'] = model.feature_importances_.tolist()
+            if hasattr(model, 'n_features_in_'):
+                model_info['n_features'] = int(model.n_features_in_)
+        except Exception as e:
+            self.logger.debug(f"Could not extract model info: {e}")
+        
+        with open(model_info_file, 'w') as f:
+            json.dump(model_info, f, indent=2)
+        
+        self.logger.info(f"Model info saved to: {model_info_file}")
+    
     def train_model(self, model_name: str, data_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
         Train a single model.
@@ -242,6 +335,7 @@ class ModelTrainer:
         # Training loop
         best_val_loss = float('inf')
         training_start_time = datetime.now()
+        final_metrics = {}
         
         self.logger.info(f"Starting training for {epochs} epochs...")
         self.logger.info(f"Training samples: {len(train_data)}")
@@ -270,6 +364,9 @@ class ModelTrainer:
                     val_metrics = model.validate(val_data)
                     val_time = metrics_tracker.stop_timer('validation')
                     metrics_tracker.update(val_metrics, prefix='val/')
+                
+                # Store final metrics
+                final_metrics = {**train_metrics, **{f'val_{k}': v for k, v in val_metrics.items()}}
                 
                 # Log epoch results
                 epoch_time = (datetime.now() - epoch_start_time).total_seconds()
@@ -320,14 +417,20 @@ class ModelTrainer:
         # Get summary
         summary = metrics_tracker.get_summary()
         
+        # Prepare results
         results = {
             'model_name': model_name,
             'data_type': self.data_type,
             'epochs_trained': epoch + 1,
             'best_val_loss': best_val_loss,
             'training_time': training_time,
-            'metrics_summary': summary
+            'metrics_summary': summary,
+            'final_metrics': final_metrics,
+            'data_shapes': {split: data.shape for split, data in data_dict.items()}
         }
+        
+        # Save results to files
+        self.save_training_results(model_name, results, model, metrics_tracker)
         
         self.logger.info(f"\nTraining completed for {model_name} on {self.data_type.upper()} data")
         self.logger.info(f"Total time: {training_time/60:.2f} minutes")
@@ -371,6 +474,9 @@ class ModelTrainer:
                 self.logger.exception("Detailed traceback:")
                 continue
         
+        # Save overall summary
+        self.save_overall_summary(all_results)
+        
         # Summary
         self.logger.info("\n" + "="*60)
         self.logger.info(f"TRAINING SUMMARY ({self.data_type.upper()} data)")
@@ -385,6 +491,46 @@ class ModelTrainer:
             )
         
         return all_results
+    
+    def save_overall_summary(self, all_results: Dict[str, Any]) -> None:
+        """
+        Save overall training summary.
+        
+        Args:
+            all_results: Dictionary of all training results
+        """
+        summary_file = self.dirs['results'] / f"training_summary_{self.data_type}.json"
+        
+        summary = {
+            'data_type': self.data_type,
+            'timestamp': datetime.now().isoformat(),
+            'total_models': len(all_results),
+            'successful_models': len([r for r in all_results.values() if r.get('best_val_loss', float('inf')) != float('inf')]),
+            'models': {}
+        }
+        
+        # Add individual model summaries
+        for model_name, results in all_results.items():
+            summary['models'][model_name] = {
+                'epochs_trained': results['epochs_trained'],
+                'best_val_loss': float(results['best_val_loss']) if results['best_val_loss'] != float('inf') else None,
+                'training_time_minutes': results['training_time'] / 60,
+                'success': results.get('best_val_loss', float('inf')) != float('inf')
+            }
+        
+        # Find best model
+        if summary['successful_models'] > 0:
+            best_model = min(all_results.keys(), 
+                           key=lambda m: all_results[m].get('best_val_loss', float('inf')))
+            summary['best_model'] = {
+                'name': best_model,
+                'loss': float(all_results[best_model]['best_val_loss'])
+            }
+        
+        with open(summary_file, 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        self.logger.info(f"Overall summary saved to: {summary_file}")
 
 
 def main():
