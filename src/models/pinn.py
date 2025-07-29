@@ -1,4 +1,12 @@
-"""Fixed Physics-Informed Neural Network (PINN) Model Implementation"""
+"""
+Fixed Physics-Informed Neural Network (PINN) Model Implementation
+
+Key fixes:
+1. Proper data preprocessing to exclude cluster_label
+2. Differentiable physics loss without CoolProp calls
+3. Simplified and more stable physics constraints
+4. Better numerical stability
+"""
 import torch
 import torch.nn as nn
 import numpy as np
@@ -12,7 +20,7 @@ class Pinn:
     """Fixed PINN model with proper data handling and differentiable physics."""
     
     def __init__(self, hidden_size: int = 64, learning_rate: float = 0.001, 
-                 lambda_physics: float = 0.01, **kwargs):  # Reduced default lambda
+                 lambda_physics: float = 0.1, **kwargs):
         """
         Args:
             hidden_size: Neurons per hidden layer.
@@ -31,41 +39,33 @@ class Pinn:
         self.input_scaler = StandardScaler()
         self.target_scaler = StandardScaler()
         
-        # Feature names for robust indexing
-        self.feature_names = [
-            'pressure_MPa', 'mass_flux_kg_m2_s', 'x_e_out__', 
-            'D_h_mm', 'length_mm', 'geometry_encoded'
-        ]
-        
         # Physics parameters
         self.debug = kwargs.get('debug', False)
-        self.physics_warmup_epochs = kwargs.get('physics_warmup_epochs', 50)  # Longer warmup
+        self.physics_warmup_epochs = kwargs.get('physics_warmup_epochs', 20)
         
-        # CHF equation parameters - realistic initial values
+        # CHF equation parameters
         self.chf_param_init = {
-            'A': 2.9e6,   # Base coefficient (typical Bowring range)
-            'B': 0.0031,  # Quality coefficient (typical Bowring range)
-            'C': 0.25     # Length coefficient (typical Bowring range)
+            'A': 0.5,   # Base coefficient
+            'B': 1e-4,  # Quality coefficient  
+            'C': 0.1    # Length coefficient
         }
         self.bowring_params = {}
-        self.loss_history = []
 
     def _prepare_data(self, data: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Properly handle data columns and exclude cluster_label."""
+        """FIXED: Properly handle data columns and exclude cluster_label."""
         # Find target column
         target_cols = [col for col in data.columns if 'chf_exp' in col.lower()]
         if not target_cols:
             raise ValueError("No CHF target column found!")
         target_col = target_cols[0]
         
-        # Explicitly exclude cluster_label and other non-feature columns
+        # CRITICAL FIX: Explicitly exclude cluster_label and other non-feature columns
         exclude_cols = [target_col, 'cluster_label'] + [col for col in data.columns if 'cluster' in col.lower()]
         feature_cols = [col for col in data.columns if col not in exclude_cols]
         
-        # Ensure we have all expected features
-        missing_features = [f for f in self.feature_names if f not in feature_cols]
-        if missing_features:
-            raise ValueError(f"Missing expected features: {missing_features}")
+        print(f"Target column: {target_col}")
+        print(f"Feature columns: {feature_cols}")
+        print(f"Excluded columns: {exclude_cols}")
         
         # Extract features and target
         X = data[feature_cols].values
@@ -75,6 +75,7 @@ class Pinn:
         if not self.is_fitted and self.model is None:
             X = self.input_scaler.fit_transform(X)
             y = self.target_scaler.fit_transform(y.reshape(-1, 1)).flatten()
+            print(f"✓ Fitted scalers - Input shape: {X.shape}, Target shape: {y.shape}")
         else:
             X = self.input_scaler.transform(X)
             y = self.target_scaler.transform(y.reshape(-1, 1)).flatten()
@@ -84,12 +85,7 @@ class Pinn:
             self.input_size = X.shape[1]
             self.model = self._build_model(self.input_size)
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
-        
-        # Data validation
-        if np.any(np.isnan(X)) or np.any(np.isnan(y)):
-            raise ValueError("NaNs detected after scaling")
-        if np.any(np.isinf(X)) or np.any(np.isinf(y)):
-            raise ValueError("Infinite values detected after scaling")
+            print(f"✓ Initialized PINN model with {self.input_size} input features")
         
         X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
         y_tensor = torch.tensor(y, dtype=torch.float32).to(self.device)
@@ -99,13 +95,13 @@ class Pinn:
         """Build neural network with learnable physics parameters."""
         model = nn.Sequential(
             nn.Linear(input_size, self.hidden_size),
-            nn.LeakyReLU(0.1),
-            nn.LayerNorm(self.hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(self.hidden_size, self.hidden_size),
-            nn.LeakyReLU(0.1), 
-            nn.LayerNorm(self.hidden_size),
+            nn.ReLU(), 
+            nn.Dropout(0.1),
             nn.Linear(self.hidden_size, self.hidden_size // 2),
-            nn.LeakyReLU(0.1),
+            nn.ReLU(),
             nn.Linear(self.hidden_size // 2, 1)
         ).to(self.device)
         
@@ -127,21 +123,13 @@ class Pinn:
         """Convert units while maintaining differentiability."""
         eps = 1e-8
         
-        # Get feature indices by name
-        pressure_idx = self.feature_names.index('pressure_MPa')
-        mass_flux_idx = self.feature_names.index('mass_flux_kg_m2_s')
-        x_e_out_idx = self.feature_names.index('x_e_out__')
-        D_h_idx = self.feature_names.index('D_h_mm')
-        length_idx = self.feature_names.index('length_mm')
-        geometry_idx = self.feature_names.index('geometry_encoded')
-        
-        # Convert with stability constraints
-        pressure_Pa = torch.clamp(inputs[:, pressure_idx] * 1e6, min=1e5, max=25e6)  # MPa to Pa
-        mass_flux = torch.clamp(inputs[:, mass_flux_idx], min=50.0)  # kg/m²s (min reasonable flow)
-        x_e_out = inputs[:, x_e_out_idx]  # Quality (can be negative)
-        D_h_m = torch.clamp(inputs[:, D_h_idx] * 1e-3, min=1e-4)  # mm to m
-        length_m = torch.clamp(inputs[:, length_idx] * 1e-3, min=0.01)  # mm to m
-        geometry = inputs[:, geometry_idx] if geometry_idx < inputs.shape[1] else torch.zeros_like(pressure_Pa)
+        # Assuming input order: pressure_MPa, mass_flux, x_e_out, D_h_mm, length_mm, geometry
+        pressure_Pa = torch.clamp(inputs[:, 0] * 1e6, min=1000.0, max=20e6)  # MPa to Pa
+        mass_flux = torch.clamp(inputs[:, 1], min=eps)  # kg/m²s
+        x_e_out = inputs[:, 2]  # Quality (can be negative)
+        D_h_m = torch.clamp(inputs[:, 3] * 1e-3, min=eps)  # mm to m
+        length_m = torch.clamp(inputs[:, 4] * 1e-3, min=eps)  # mm to m
+        geometry = inputs[:, 5] if inputs.shape[1] > 5 else torch.zeros_like(pressure_Pa)
         
         return {
             'pressure_Pa': pressure_Pa,
@@ -153,25 +141,31 @@ class Pinn:
         }
 
     def _approximated_latent_heat(self, pressure_Pa: torch.Tensor) -> torch.Tensor:
-        """Differentiable approximation of latent heat of vaporization."""
+        """FIXED: Differentiable approximation of latent heat of vaporization."""
+        # Polynomial approximation for h_fg as function of pressure
+        # Based on steam tables, h_fg decreases with pressure
+        # This is a simplified approximation - you could use a more sophisticated one
+        
         # Convert Pa to MPa for better numerical stability
         P_MPa = pressure_Pa / 1e6
         
         # Polynomial approximation: h_fg ≈ a + b*P + c*P²
-        # Coefficients fitted to steam table data (accurate within 5% for 0.1-20MPa)
-        a = 2.257e6   # MJ/kg at 0.1MPa
-        b = -3.85e4   # Linear coefficient
-        c = -1.15e3   # Quadratic coefficient
+        # Coefficients fitted to steam table data (approximate)
+        a = 2.3e6   # ~2.3 MJ/kg at low pressure
+        b = -4e4    # Decreases with pressure
+        c = -1e3    # Slight curvature
         
-        h_fg = a + b * P_MPa + c * (P_MPa**2)
+        h_fg = a + b * P_MPa + c * P_MPa**2
         
         # Clamp to reasonable range (0.1 - 2.5 MJ/kg)
-        return torch.clamp(h_fg, min=1e5, max=2.5e6)
+        h_fg = torch.clamp(h_fg, min=1e5, max=2.5e6)
+        
+        return h_fg
 
     def _physics_loss(self, inputs: torch.Tensor, predictions: torch.Tensor) -> torch.Tensor:
-        """Differentiable physics loss without CoolProp."""
+        """FIXED: Differentiable physics loss without CoolProp."""
         try:
-            # Convert units with stability constraints
+            # Convert units
             units = self._convert_units_differentiable(inputs)
             pressure_Pa = units['pressure_Pa']
             mass_flux = units['mass_flux']
@@ -187,33 +181,25 @@ class Pinn:
             B = self.bowring_params['B']
             C = self.bowring_params['C']
             
-            # Physics equation (Bowring-style correlation)
+            # Physics equation (your CHF correlation)
             numerator = A - B * x_e_out * h_fg
-            
-            # Stabilized denominator calculation
-            denominator_base = C + length_m
-            correction = (4 * B * length_m) / (mass_flux * D_h_m + 1e-8)
-            
-            # Constrain correction to prevent negative denominators
-            max_correction = 0.95 * denominator_base
-            correction = torch.clamp(correction, max=max_correction)
-            
-            denominator = denominator_base - correction
+            denominator = C + length_m - (4 * B * length_m) / (mass_flux * D_h_m)
             
             # Numerical stability
             denominator = denominator + torch.sign(denominator) * 1e-8
             
-            # Physics prediction (q_chf in W/m²)
+            # Physics prediction
             q_chf_physics = numerator / denominator
             
-            # Model prediction (in scaled space)
+            # Model prediction (in scaled space, convert to physical units)
             q_chf_pred_scaled = predictions.squeeze()
             
-            # Convert physics prediction to scaled space
+            # For physics loss comparison, we need both in same units
+            # Convert physics prediction to scaled space for fair comparison
             q_chf_physics_np = q_chf_physics.detach().cpu().numpy().reshape(-1, 1)
             if hasattr(self.target_scaler, 'mean_'):  # Check if scaler is fitted
                 # Transform physics prediction to same scale as model output
-                q_chf_physics_scaled = self.target_scaler.transform(q_chf_physics_np)
+                q_chf_physics_scaled = self.target_scaler.transform(q_chf_physics_np / 1e6)  # MW/m²
                 q_chf_physics_scaled = torch.tensor(q_chf_physics_scaled.flatten(), 
                                                   device=self.device, requires_grad=True)
             else:
@@ -228,11 +214,9 @@ class Pinn:
             negative_denom_penalty = torch.mean(torch.relu(-denominator) ** 2)
             
             # 2. Parameters should be in reasonable ranges
-            param_penalty = (
-                torch.relu(torch.abs(A) - 5e6).clamp(min=0)**2 + 
-                torch.relu(torch.abs(B) - 0.01)**2 + 
-                torch.relu(torch.abs(C) - 2.0)**2
-            )
+            param_penalty = torch.relu(torch.abs(A) - 2.0)**2 + \
+                           torch.relu(torch.abs(B) - 1e-2)**2 + \
+                           torch.relu(torch.abs(C) - 1.0)**2
             
             total_physics_loss = physics_loss + 0.1 * negative_denom_penalty + 0.01 * param_penalty
             
@@ -244,7 +228,8 @@ class Pinn:
             # Return zero physics loss if computation fails
             return torch.tensor(0.0, device=self.device, requires_grad=True)
 
-    def train_epoch(self, train_data: pd.DataFrame, batch_size: int = 32) -> Dict[str, float]:
+    def train_epoch(self, train_data: pd.DataFrame, batch_size: int = 32, 
+                   optimizer: Any = None) -> Dict[str, float]:
         """Train one epoch with adaptive physics weighting."""
         X_train, y_train = self._prepare_data(train_data)
         dataset = torch.utils.data.TensorDataset(X_train, y_train)
@@ -255,9 +240,11 @@ class Pinn:
         total_data_loss = 0.0
         total_physics_loss = 0.0
         
-        # Gradually increase physics weight (exponential warmup)
-        warmup = min(1.0, self.epoch / self.physics_warmup_epochs)
-        current_physics_weight = self.lambda_physics * (warmup ** 2)
+        # Gradually increase physics weight
+        if self.epoch < self.physics_warmup_epochs:
+            current_physics_weight = self.lambda_physics * (self.epoch / self.physics_warmup_epochs)
+        else:
+            current_physics_weight = self.lambda_physics
         
         for batch_idx, (inputs, targets) in enumerate(dataloader):
             self.optimizer.zero_grad()
@@ -289,48 +276,6 @@ class Pinn:
             total_loss += total_batch_loss.item()
             total_data_loss += data_loss.item()
             total_physics_loss += physics_loss.item()
-            
-            # Diagnostic logging for first batch
-            if batch_idx == 0 and (self.debug or self.epoch % 10 == 0):
-                with torch.no_grad():
-                    # Get sample predictions
-                    sample_pred = outputs[0].item()
-                    sample_target = targets[0].item()
-                    
-                    # Convert physics prediction
-                    units = self._convert_units_differentiable(inputs)
-                    pressure = units['pressure_Pa'][0].item() / 1e6
-                    mass_flux = units['mass_flux'][0].item()
-                    x_e = units['x_e_out'][0].item()
-                    
-                    # Calculate physics prediction
-                    h_fg = self._approximated_latent_heat(units['pressure_Pa'][0]).item()
-                    A = self.bowring_params['A'].item()
-                    B = self.bowring_params['B'].item()
-                    C = self.bowring_params['C'].item()
-                    numerator = A - B * x_e * h_fg
-                    denominator = C + units['length_m'][0].item() - (4 * B * units['length_m'][0].item()) / (mass_flux * units['D_h_m'][0].item())
-                    phys_pred = numerator / denominator if denominator > 1e-6 else 0
-                    
-                    # Inverse scale for human-readable values
-                    try:
-                        sample_pred_orig = self.target_scaler.inverse_transform(
-                            np.array([[sample_pred]]))[0][0]
-                        sample_target_orig = self.target_scaler.inverse_transform(
-                            np.array([[sample_target]]))[0][0]
-                        phys_pred_orig = self.target_scaler.inverse_transform(
-                            np.array([[phys_pred]]))[0][0] if phys_pred != 0 else 0
-                    except:
-                        sample_pred_orig = sample_pred
-                        sample_target_orig = sample_target
-                        phys_pred_orig = phys_pred
-                    
-                    print(
-                        f"Sample: P={pressure:.2f}MPa, G={mass_flux:.0f}, x={x_e:.3f} | "
-                        f"Target: {sample_target_orig:.2f} | "
-                        f"Pred: {sample_pred_orig:.2f} | "
-                        f"Physics: {phys_pred_orig:.2f}"
-                    )
         
         # Calculate averages
         n_batches = len(dataloader)
@@ -340,7 +285,6 @@ class Pinn:
         
         self.epoch += 1
         self.is_fitted = True
-        self.loss_history.append(avg_loss)
         
         metrics = {
             'loss': avg_loss,
@@ -353,7 +297,7 @@ class Pinn:
         if self.debug or self.epoch % 10 == 0:
             print(f"Epoch {self.epoch}: Loss={avg_loss:.6f}, "
                   f"Data={avg_data_loss:.6f}, Physics={avg_physics_loss:.6f}, "
-                  f"Weight={current_physics_weight:.6f}")
+                  f"Weight={current_physics_weight:.4f}")
             
             # Print learned parameters
             params = self.get_chf_parameters()
@@ -374,7 +318,7 @@ class Pinn:
             # R² calculation
             ss_res = torch.sum((y_test - predictions) ** 2)
             ss_tot = torch.sum((y_test - y_test.mean()) ** 2)
-            r2 = 1 - ss_res / (ss_tot + 1e-8)  # Add epsilon for stability
+            r2 = 1 - ss_res / ss_tot
         
         return {
             'loss': mse.item(),
@@ -425,9 +369,7 @@ class Pinn:
             'is_fitted': self.is_fitted,
             'input_scaler': pickle.dumps(self.input_scaler),
             'target_scaler': pickle.dumps(self.target_scaler),
-            'chf_params': chf_params_dict,
-            'feature_names': self.feature_names,
-            'loss_history': self.loss_history
+            'chf_params': chf_params_dict
         }
         
         if metadata:
@@ -435,10 +377,14 @@ class Pinn:
         
         path = Path(path).with_suffix('.pth')
         torch.save(save_dict, path)
+        print(f"✓ Saved PINN model to {path}")
 
     def load(self, path: Path):
         """Load model state."""
-        checkpoint = torch.load(path, map_location=self.device)
+        from sklearn.preprocessing import StandardScaler
+        torch.serialization.add_safe_globals([StandardScaler])
+        
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
         # Restore attributes
         self.input_size = checkpoint['input_size']
@@ -446,11 +392,6 @@ class Pinn:
         self.lambda_physics = checkpoint['lambda_physics']
         self.epoch = checkpoint['epoch']
         self.is_fitted = checkpoint['is_fitted']
-        self.feature_names = checkpoint.get('feature_names', [
-            'pressure_MPa', 'mass_flux_kg_m2_s', 'x_e_out__', 
-            'D_h_mm', 'length_mm', 'geometry_encoded'
-        ])
-        self.loss_history = checkpoint.get('loss_history', [])
         
         # Load scalers
         if 'input_scaler' in checkpoint:
@@ -476,6 +417,9 @@ class Pinn:
             param_name = f'chf_{name}'
             if hasattr(self.model, param_name):
                 self.bowring_params[name] = getattr(self.model, param_name)
+        
+        print(f"✓ Loaded PINN model from {path} (epoch {self.epoch})")
+        return checkpoint.get('metadata', {})
 
     def get_feature_importance(self) -> pd.DataFrame:
         """Get gradient-based feature importance."""
@@ -488,13 +432,7 @@ class Pinn:
         
         gradients = torch.abs(dummy_input.grad).cpu().numpy().flatten()
         
-        # Get feature names if available
-        try:
-            feature_names = self.input_scaler.feature_names_in_
-        except AttributeError:
-            feature_names = [f'feature_{i}' for i in range(len(gradients))]
-        
         return pd.DataFrame({
-            'feature': feature_names,
+            'feature': [f'feature_{i}' for i in range(len(gradients))],
             'importance': gradients
         }).sort_values('importance', ascending=False)
