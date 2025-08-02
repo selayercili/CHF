@@ -284,8 +284,9 @@ class ModelTester:
 
             self.logger.debug(f"Test data shape: {X_test.shape}")
             self.logger.debug(f"Target shape: {y_true.shape}")
+            self.logger.debug(f"Model: {model_name}")
 
-            # Make predictions
+            # Make predictions - pass only features, no target column
             predictions = model.predict(X_test)
             
             # Ensure predictions are numpy array
