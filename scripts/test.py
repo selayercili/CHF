@@ -153,25 +153,64 @@ class ModelTester:
             self.logger.warning(f"No weights directory found for {model_name} in {weights_dir}")
             return None
         
+        # Look for different file extensions that models might use
+        possible_extensions = ['.pth', '.pkl', '.joblib', '.json', '.txt']
+        
         if weights_type == "best":
-            # Look for best_model.pth
-            best_path = model_weights_dir / "best_model.pth"
+            # Look for best_model with various extensions
+            for ext in possible_extensions:
+                best_path = model_weights_dir / f"best_model{ext}"
+                if best_path.exists():
+                    self.logger.debug(f"Found best weights: {best_path}")
+                    return best_path
+            
+            # Also look for just "best" without extension
+            best_path = model_weights_dir / "best_model"
             if best_path.exists():
+                self.logger.debug(f"Found best weights: {best_path}")
                 return best_path
-            else:
-                self.logger.warning(f"No best_model.pth found for {model_name}, trying latest")
-                weights_type = "latest"
+            
+            self.logger.warning(f"No best_model file found for {model_name}, trying latest")
+            weights_type = "latest"
         
         if weights_type == "latest":
-            # Find the latest epoch
-            epoch_files = list(model_weights_dir.glob("epoch_*.pth"))
-            if not epoch_files:
-                self.logger.warning(f"No epoch files found for {model_name}")
-                return None
+            # Find the latest epoch files
+            epoch_files = []
+            for ext in possible_extensions:
+                epoch_files.extend(list(model_weights_dir.glob(f"epoch_*{ext}")))
             
-            # Sort by epoch number
-            epoch_files.sort(key=lambda x: int(x.stem.split('_')[1]))
-            return epoch_files[-1]
+            # Also check for epoch files without extension
+            epoch_files.extend(list(model_weights_dir.glob("epoch_*")))
+            
+            if not epoch_files:
+                # If no epoch files, look for any model files
+                all_files = []
+                for ext in possible_extensions:
+                    all_files.extend(list(model_weights_dir.glob(f"*{ext}")))
+                
+                if all_files:
+                    # Sort by modification time and take the latest
+                    all_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                    self.logger.warning(f"No epoch files found, using latest file: {all_files[0]}")
+                    return all_files[0]
+                else:
+                    self.logger.warning(f"No model files found for {model_name}")
+                    return None
+            
+            # Sort epoch files by epoch number
+            def extract_epoch_num(path):
+                try:
+                    # Extract number from epoch_XX.ext or epoch_XX
+                    stem = path.stem
+                    if stem.startswith('epoch_'):
+                        return int(stem.split('_')[1])
+                    return 0
+                except (ValueError, IndexError):
+                    return 0
+            
+            epoch_files.sort(key=extract_epoch_num, reverse=True)
+            self.logger.debug(f"Found latest weights: {epoch_files[0]}")
+            return epoch_files[0]
         
         return None
     
