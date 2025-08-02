@@ -176,8 +176,8 @@ class ModelTester:
         return None
     
     def test_model(self, model_name: str, test_data: pd.DataFrame, 
-                   weights_dir: Path, results_dir: Path, data_type_label: str,
-                   weights_type: str = "best") -> Optional[Dict[str, Any]]:
+               weights_dir: Path, results_dir: Path, data_type_label: str,
+               weights_type: str = "best") -> Optional[Dict[str, Any]]:
         """
         Test a single model.
         
@@ -209,56 +209,67 @@ class ModelTester:
             self.logger.error(f"Failed to create model {model_name}: {str(e)}")
             return None
         
-        # Load weights
+        # Load weights - Always use custom load method since all models have it
         try:
-            if hasattr(model, 'load'):
-                # Model has custom load method
-                metadata = model.load(weights_path)
-                self.logger.info(f"Loaded model from epoch: {model.epoch if hasattr(model, 'epoch') else 'unknown'}")
-            else:
-                # Generic loading
-                import torch    
-                checkpoint = torch.load(weights_path, map_location='cpu', weights_only=False)
-                
-                if 'model_state_dict' in checkpoint:
-                    model.load_state_dict(checkpoint['model_state_dict'])
-                elif 'model' in checkpoint:
-                    model = checkpoint['model']
-                else:
-                    self.logger.error(f"Unknown checkpoint format for {model_name}")
-                    return None
-                
-                metadata = checkpoint.get('metadata', {})
+            self.logger.debug(f"Using custom load method for {model_name}")
+            metadata = model.load(weights_path)
+            self.logger.info(f"Successfully loaded model weights")
+            
+            # Log epoch info if available
+            if hasattr(model, 'epoch'):
+                self.logger.info(f"Model epoch: {model.epoch}")
+            elif isinstance(metadata, dict) and 'epoch' in metadata:
+                self.logger.info(f"Model epoch: {metadata['epoch']}")
         
+        except AttributeError as e:
+            self.logger.error(f"Model {model_name} doesn't have a load method: {str(e)}")
+            return None
         except Exception as e:
             self.logger.error(f"Failed to load weights for {model_name}: {str(e)}")
+            self.logger.exception("Detailed error:")
             return None
+        
+        # Set device for PyTorch models
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if hasattr(model, 'to'):
             model.to(device)
+        
         # Make predictions
         try:
             import time
             start_time = time.time()
 
-            # Ensure input retains column names if needed
-            X_test = test_data.iloc[:, :-1]  # use DataFrame, not NumPy array
+            # Prepare test data - keep as DataFrame to preserve column names
+            X_test = test_data.iloc[:, :-1]
             y_true = test_data.iloc[:, -1].values
 
+            self.logger.debug(f"Test data shape: {X_test.shape}")
+            self.logger.debug(f"Target shape: {y_true.shape}")
+
+            # Make predictions
             predictions = model.predict(X_test)
+            
+            # Ensure predictions are numpy array
+            if not isinstance(predictions, np.ndarray):
+                predictions = np.array(predictions)
 
             inference_time = time.time() - start_time
+
+            self.logger.info(f"Predictions completed in {inference_time:.2f}s")
+            self.logger.info(f"Prediction range: [{predictions.min():.4f}, {predictions.max():.4f}]")
 
             # Calculate metrics
             metrics = calculate_metrics(y_true, predictions, task='regression')
             metrics['inference_time'] = inference_time
             metrics['samples_per_second'] = len(test_data) / inference_time
 
+            # Additional error statistics
             errors = y_true - predictions
             percentiles = [5, 25, 50, 75, 95]
             for p in percentiles:
                 metrics[f'error_p{p}'] = np.percentile(np.abs(errors), p)
 
+            # Create results dictionary
             results = {
                 'model_name': model_name,
                 'data_type': data_type_label,
@@ -268,12 +279,17 @@ class ModelTester:
                 'predictions': predictions,
                 'actual': y_true,
                 'test_size': len(test_data),
-                'model_config': self.model_config.get(model_name, {})
+                'model_config': self.model_config.get(model_name, {}),
+                'metadata': metadata if isinstance(metadata, dict) else {}
             }
+            
+            self.logger.info(f"Testing completed successfully for {model_name}")
+            self.logger.info(f"RMSE: {metrics.get('rmse', 'N/A'):.6f}, MAE: {metrics.get('mae', 'N/A'):.6f}, R²: {metrics.get('r2', 'N/A'):.6f}")
+            
             return results
 
         except Exception as e:
-            self.logger.error(f"Error during testing {model_name}: {str(e)}")
+            self.logger.error(f"Error during prediction for {model_name}: {str(e)}")
             self.logger.exception("Detailed traceback:")
             return None
     
