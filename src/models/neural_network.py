@@ -45,30 +45,35 @@ class NeuralNetwork:
             nn.Linear(self.hidden_size, self.output_size)
         ).to(self.device)
     
-    def _prepare_data(self, data: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _prepare_data(self, data: pd.DataFrame, is_prediction: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Prepare data for training/validation.
+        Prepare data for training/validation/prediction.
         
         Args:
-            data: DataFrame with features and target
+            data: DataFrame with features and optionally target
+            is_prediction: If True, assumes no target column present
             
         Returns:
-            Tuple of (features, target) tensors
+            Tuple of (features, target) tensors. Target is None for prediction.
         """
-        # Get target column name dynamically
-        target_col = [col for col in data.columns if 'chf_exp' in col][0]
+        if is_prediction:
+            # For prediction, assume all columns are features
+            X = data.values
+            y = None
+        else:
+            # For training/validation, assume last column is target
+            X = data.iloc[:, :-1].values
+            y = data.iloc[:, -1].values
         
-        # Separate features and target
-        X = data.drop(target_col, axis=1).values
-        y = data[target_col].values
-        
-        # Add scaling:
+        # Scale features
         if not self.is_fitted:
             X = self.input_scaler.fit_transform(X)
-            y = self.target_scaler.fit_transform(y.reshape(-1, 1))
+            if y is not None:
+                y = self.target_scaler.fit_transform(y.reshape(-1, 1))
         else:
             X = self.input_scaler.transform(X)
-            y = self.target_scaler.transform(y.reshape(-1, 1))
+            if y is not None:
+                y = self.target_scaler.transform(y.reshape(-1, 1))
         
         # Initialize model if not done yet
         if self.model is None:
@@ -77,10 +82,17 @@ class NeuralNetwork:
             self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
             print(f"✓ Built model for {self.input_size} input features")
         
-        X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
-        y_tensor = torch.tensor(y, dtype=torch.float32).view(-1, 1).to(self.device)
+        # Validate input size consistency
+        if X.shape[1] != self.input_size:
+            raise ValueError(f"Input has {X.shape[1]} features, but model expects {self.input_size} features")
         
-        return X_tensor, y_tensor
+        X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
+        
+        if y is not None:
+            y_tensor = torch.tensor(y, dtype=torch.float32).view(-1, 1).to(self.device)
+            return X_tensor, y_tensor
+        else:
+            return X_tensor, None
     
     def train_epoch(self, train_data: pd.DataFrame, 
                     batch_size: int = 32,
@@ -97,7 +109,7 @@ class NeuralNetwork:
             Dictionary of training metrics
         """
         # Prepare data
-        X_train, y_train = self._prepare_data(train_data)
+        X_train, y_train = self._prepare_data(train_data, is_prediction=False)
         
         # Create DataLoader
         dataset = torch.utils.data.TensorDataset(X_train, y_train)
@@ -143,7 +155,7 @@ class NeuralNetwork:
             raise ValueError("Model must be trained before validation")
         
         # Prepare data
-        X_test, y_test = self._prepare_data(test_data)
+        X_test, y_test = self._prepare_data(test_data, is_prediction=False)
         
         # Create DataLoader
         dataset = torch.utils.data.TensorDataset(X_test, y_test)
@@ -174,7 +186,7 @@ class NeuralNetwork:
         Make predictions on new data.
         
         Args:
-            data: DataFrame with features
+            data: DataFrame with features (no target column expected)
             
         Returns:
             Array of predictions
@@ -182,18 +194,9 @@ class NeuralNetwork:
         if not self.is_fitted:
             raise ValueError("Model must be trained before prediction")
         
-        # Get target column name dynamically
-        target_col = [col for col in data.columns if 'chf_exp' in col][0] if any('chf_exp' in col for col in data.columns) else None
-        
-        # Remove target column if present
-        if target_col and target_col in data.columns:
-            X = data.drop(target_col, axis=1).values
-        else:
-            X = data.values
-        
-        # Scale input
-        X = self.input_scaler.transform(X)
-        X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
+        # For prediction, we assume no target column is present
+        # The test.py file should pass only feature columns
+        X_tensor, _ = self._prepare_data(data, is_prediction=True)
         
         self.model.eval()
         with torch.no_grad():
@@ -272,10 +275,15 @@ class NeuralNetwork:
         # CRITICAL: Load the fitted scalers!
         if 'input_scaler' in checkpoint:
             self.input_scaler = pickle.loads(checkpoint['input_scaler'])
+        else:
+            raise ValueError("No input scaler found in checkpoint - model cannot make predictions")
+            
         if 'target_scaler' in checkpoint:
             self.target_scaler = pickle.loads(checkpoint['target_scaler'])
+        else:
+            raise ValueError("No target scaler found in checkpoint - model cannot make predictions")
         
-        print(f"✓ Loaded model from {path} (epoch {self.epoch})")
+        print(f"✓ Loaded model from {path} (epoch {self.epoch}, input_size: {self.input_size})")
         
         return checkpoint.get('metadata', {})
     
