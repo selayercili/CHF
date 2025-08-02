@@ -538,9 +538,9 @@ class ModelTester:
         if not all_results:
             return
         
-        # Create combined results directory
+        # Create combined results directory with proper parent creation
         combined_dir = Path("results") / "combined_comparison"
-        combined_dir.mkdir(exist_ok=True)
+        combined_dir.mkdir(parents=True, exist_ok=True)  # Added parents=True
         
         # Create comparison data
         comparison_data = []
@@ -582,21 +582,68 @@ class ModelTester:
                     smote_data = model_data[model_data['data_type'] == 'smote'].iloc[0]
                     regular_data = model_data[model_data['data_type'] == 'regular'].iloc[0]
                     
-                    # Calculate improvements
-                    rmse_improvement = (regular_data['rmse'] - smote_data['rmse']) / regular_data['rmse'] * 100
-                    r2_improvement = (smote_data['r2'] - regular_data['r2']) / abs(regular_data['r2']) * 100
+                    # Calculate improvements (with safety checks)
+                    rmse_improvement = 0
+                    r2_improvement = 0
+                    
+                    if regular_data['rmse'] != 0:
+                        rmse_improvement = (regular_data['rmse'] - smote_data['rmse']) / regular_data['rmse'] * 100
+                    
+                    if abs(regular_data['r2']) > 1e-8:  # Avoid division by very small numbers
+                        r2_improvement = (smote_data['r2'] - regular_data['r2']) / abs(regular_data['r2']) * 100
                     
                     f.write("| Metric | Regular | SMOTE | Improvement |\n")
                     f.write("|--------|---------|-------|-------------|\n")
                     f.write(f"| RMSE | {regular_data['rmse']:.6f} | {smote_data['rmse']:.6f} | {rmse_improvement:+.1f}% |\n")
-                    f.write(f"| MAE | {regular_data['mae']:.6f} | {smote_data['mae']:.6f} | - |\n")
+                    
+                    # Check if MAE exists before using it
+                    if 'mae' in regular_data and 'mae' in smote_data:
+                        mae_improvement = 0
+                        if regular_data['mae'] != 0:
+                            mae_improvement = (regular_data['mae'] - smote_data['mae']) / regular_data['mae'] * 100
+                        f.write(f"| MAE | {regular_data['mae']:.6f} | {smote_data['mae']:.6f} | {mae_improvement:+.1f}% |\n")
+                    else:
+                        f.write(f"| MAE | - | - | - |\n")
+                    
                     f.write(f"| R² | {regular_data['r2']:.6f} | {smote_data['r2']:.6f} | {r2_improvement:+.1f}% |\n")
                     f.write("\n")
+                else:
+                    # Only one data type available
+                    data_type = model_data.iloc[0]['data_type']
+                    f.write(f"Only {data_type.upper()} data available for this model.\n\n")
             
             # Summary statistics
             f.write("## Summary Statistics\n\n")
-            summary = comparison_df.groupby('data_type')[['rmse', 'mae', 'r2']].agg(['mean', 'std'])
-            f.write(summary.to_markdown())
+            
+            # Check which metrics are available
+            available_metrics = []
+            for metric in ['rmse', 'mae', 'r2']:
+                if metric in comparison_df.columns:
+                    available_metrics.append(metric)
+            
+            if available_metrics:
+                summary = comparison_df.groupby('data_type')[available_metrics].agg(['mean', 'std'])
+                f.write(summary.to_markdown())
+            else:
+                f.write("No standard metrics available for summary.\n")
+        
+        self.logger.info(f"Saved combined comparison report to: {report_path}")
+
+        # Also save a simple summary to console
+        self.logger.info("\n" + "="*60)
+        self.logger.info("COMBINED COMPARISON SUMMARY")
+        self.logger.info("="*60)
+        
+        if 'rmse' in comparison_df.columns:
+            best_overall = comparison_df.loc[comparison_df['rmse'].idxmin()]
+            self.logger.info(f"Overall best model: {best_overall['model']} ({best_overall['data_type'].upper()}) - RMSE: {best_overall['rmse']:.6f}")
+        
+        # Count models by data type
+        smote_models = len(comparison_df[comparison_df['data_type'] == 'smote'])
+        regular_models = len(comparison_df[comparison_df['data_type'] == 'regular'])
+        self.logger.info(f"Models tested: {smote_models} SMOTE, {regular_models} Regular")
+        
+        self.logger.info("="*60)
 
 
 def main():
