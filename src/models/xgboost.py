@@ -184,7 +184,7 @@ class Xgboost:
             raise ValueError("Model must be trained before prediction")
         
         # If data has target column, remove it
-        if data.shape[1] == self.model.n_features_in_ + 1:
+        if hasattr(self.model, 'n_features_in_') and data.shape[1] == self.model.n_features_in_ + 1:
             X = data.iloc[:, :-1].values
         else:
             X = data.values
@@ -202,28 +202,34 @@ class Xgboost:
         # Ensure path is a Path object
         path = Path(path)
         
-        # Create a temporary directory to store XGBoost model
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Save XGBoost model to temporary JSON file
-            temp_model_path = Path(temp_dir) / "xgboost_model.json"
-            self.model.save_model(str(temp_model_path))
-            
-            # Read the model JSON
-            with open(temp_model_path, 'r') as f:
-                model_json = f.read()
-        
-        # Create save dictionary with everything
+        # Create save dictionary
         save_dict = {
-            'model_json': model_json,  # Store model as JSON string
             'task_type': self.task_type,
             'is_fitted': self.is_fitted,
             'params': self.params,
             'tuning_params': self.tuning_params,
-            'n_features': self.model.n_features_in_ if hasattr(self.model, 'n_features_in_') else None
         }
+        
+        # Only save n_features if model is fitted and has this attribute
+        if self.is_fitted and hasattr(self.model, 'n_features_in_'):
+            save_dict['n_features'] = self.model.n_features_in_
         
         if metadata:
             save_dict['metadata'] = metadata
+        
+        # Save XGBoost model using its native save method
+        if self.is_fitted:
+            # Create a temporary directory to store XGBoost model
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Save XGBoost model to temporary JSON file
+                temp_model_path = Path(temp_dir) / "xgboost_model.json"
+                self.model.save_model(str(temp_model_path))
+                
+                # Read the model JSON
+                with open(temp_model_path, 'r') as f:
+                    model_json = f.read()
+                
+                save_dict['model_json'] = model_json
         
         # Save everything to a single pickle file
         with open(path, 'wb') as f:
@@ -249,25 +255,25 @@ class Xgboost:
         self.tuning_params = save_dict.get('tuning_params', {})
         self.is_fitted = save_dict['is_fitted']
         
-        # Recreate the model
+        # Recreate the model with original parameters
         if self.task_type == 'classification':
             self.model = xgb.XGBClassifier(**self.params)
         else:
             self.model = xgb.XGBRegressor(**self.params)
         
-        # Load the model from JSON string
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Write JSON to temporary file
-            temp_model_path = Path(temp_dir) / "xgboost_model.json"
-            with open(temp_model_path, 'w') as f:
-                f.write(save_dict['model_json'])
-            
-            # Load model from temporary file
-            self.model.load_model(str(temp_model_path))
-        
-        # Set n_features_in_ if it was saved
-        if 'n_features' in save_dict and save_dict['n_features'] is not None:
-            self.model.n_features_in_ = save_dict['n_features']
+        # Load the trained model if it was fitted
+        if self.is_fitted and 'model_json' in save_dict:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Write JSON to temporary file
+                temp_model_path = Path(temp_dir) / "xgboost_model.json"
+                with open(temp_model_path, 'w') as f:
+                    f.write(save_dict['model_json'])
+                
+                # Load model from temporary file
+                self.model.load_model(str(temp_model_path))
+                
+                # The n_features_in_ should be set automatically after loading
+                # Do NOT try to set it manually
         
         return save_dict.get('metadata', {})
     
