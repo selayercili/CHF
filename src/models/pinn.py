@@ -67,7 +67,15 @@ class Pinn:
         self.loss_history = {'total': [], 'data': [], 'physics': [], 'epoch': []}
 
     def _prepare_data(self, data: pd.DataFrame, is_training: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
-        """FIXED: Robust data preparation with proper error handling."""
+        """FIXED: Robust data preparation with consistent data types and feature ordering."""
+        
+        print(f"_prepare_data - Input shape: {data.shape}, Training: {is_training}")
+        print(f"_prepare_data - Columns: {list(data.columns)}")
+        
+        # CRITICAL: Check and report data types
+        print("Data types before processing:")
+        for col in data.columns:
+            print(f"  {col}: {data[col].dtype}")
         
         # Find target column
         target_candidates = ['chf_exp', 'CHF_exp', 'CHF', 'target']
@@ -98,16 +106,45 @@ class Pinn:
         
         print(f"Feature columns ({len(feature_cols)}): {feature_cols}")
         
+        # CRITICAL: Store feature column order for consistency
+        self._last_feature_cols = feature_cols
+        
         # Validate we have expected features
         if len(feature_cols) < 5:  # Minimum expected features
             raise ValueError(f"Too few features found: {len(feature_cols)}. Expected at least 5.")
         
-        # Extract data
+        # CRITICAL FIX: Force consistent data types
         try:
-            X = data[feature_cols].values.astype(np.float32)
-            y = data[target_col].values.astype(np.float32)
+            # Convert ALL columns to float64 first to ensure consistency
+            data_copy = data.copy()
+            
+            # Convert feature columns to float64
+            for col in feature_cols:
+                if data_copy[col].dtype != np.float64:
+                    print(f"Converting {col} from {data_copy[col].dtype} to float64")
+                    data_copy[col] = data_copy[col].astype(np.float64)
+            
+            # Convert target column to float64  
+            if data_copy[target_col].dtype != np.float64:
+                print(f"Converting {target_col} from {data_copy[target_col].dtype} to float64")
+                data_copy[target_col] = data_copy[target_col].astype(np.float64)
+            
+            # Extract data with consistent types
+            X = data_copy[feature_cols].values.astype(np.float32)  # Final conversion to float32
+            y = data_copy[target_col].values.astype(np.float32)
+            
+            print(f"After type conversion - X dtype: {X.dtype}, y dtype: {y.dtype}")
+            print(f"Raw data - X shape: {X.shape}, y shape: {y.shape}")
+            print(f"Raw data - X range: [{X.min():.6f}, {X.max():.6f}]")
+            print(f"Raw data - y range: [{y.min():.6f}, {y.max():.6f}]")
+            
+            # Check for any remaining issues
+            print("Feature-wise ranges:")
+            for i, col in enumerate(feature_cols):
+                print(f"  {col}: [{X[:, i].min():.6f}, {X[:, i].max():.6f}]")
+            
         except Exception as e:
-            raise ValueError(f"Error extracting data: {e}")
+            raise ValueError(f"Error extracting data with type conversion: {e}")
         
         # Check for missing values
         if np.isnan(X).any() or np.isnan(y).any():
@@ -118,18 +155,27 @@ class Pinn:
         
         # Initialize or fit scalers
         if is_training and (not self.is_fitted or self.model is None):
-            print("Fitting scalers...")
+            print("Fitting scalers with consistent data types...")
             X_scaled = self.input_scaler.fit_transform(X)
             y_scaled = self.target_scaler.fit_transform(y.reshape(-1, 1)).flatten()
             
-            print(f"Input scaling - Original range: [{X.min():.3f}, {X.max():.3f}]")
-            print(f"Input scaling - Scaled range: [{X_scaled.min():.3f}, {X_scaled.max():.3f}]")
-            print(f"Target scaling - Original range: [{y.min():.3f}, {y.max():.3f}]")
-            print(f"Target scaling - Scaled range: [{y_scaled.min():.3f}, {y_scaled.max():.3f}]")
+            print(f"Input scaling - Original range: [{X.min():.6f}, {X.max():.6f}]")
+            print(f"Input scaling - Scaled range: [{X_scaled.min():.6f}, {X_scaled.max():.6f}]")
+            print(f"Target scaling - Original range: [{y.min():.6f}, {y.max():.6f}]")
+            print(f"Target scaling - Scaled range: [{y_scaled.min():.6f}, {y_scaled.max():.6f}]")
+            
+            # Store scaler information for debugging
+            print(f"Input scaler - mean: {self.input_scaler.mean_[:3]}...")
+            print(f"Input scaler - scale: {self.input_scaler.scale_[:3]}...")
+            print(f"Target scaler - data_min: {self.target_scaler.data_min_}")
+            print(f"Target scaler - data_max: {self.target_scaler.data_max_}")
             
         else:
+            print("Using existing scalers with type-corrected data...")
             X_scaled = self.input_scaler.transform(X)
             y_scaled = self.target_scaler.transform(y.reshape(-1, 1)).flatten()
+            print(f"Using existing scalers - X_scaled range: [{X_scaled.min():.6f}, {X_scaled.max():.6f}]")
+            print(f"Using existing scalers - y_scaled range: [{y_scaled.min():.6f}, {y_scaled.max():.6f}]")
         
         # Initialize model if needed
         if self.model is None:
@@ -144,6 +190,11 @@ class Pinn:
                 self.optimizer, mode='min', factor=0.5, patience=20, verbose=True
             )
             print(f"✓ Initialized PINN model with {self.input_size} input features")
+        
+        # Validate input size consistency
+        if X_scaled.shape[1] != self.input_size:
+            raise ValueError(f"Feature size mismatch! Expected {self.input_size}, got {X_scaled.shape[1]}. "
+                           f"Current features: {feature_cols}")
         
         # Convert to tensors
         X_tensor = torch.tensor(X_scaled, dtype=torch.float32).to(self.device)
@@ -495,35 +546,105 @@ class Pinn:
         }
 
     def predict(self, data: pd.DataFrame) -> np.ndarray:
-        """Make predictions - FIXED."""
+        """CRITICAL FIX: Make predictions with consistent data types and feature handling."""
         if self.model is None:
             raise ValueError("Model not trained yet")
         
-        # Prepare data for prediction (no target column expected)
+        print(f"Predict input - Data shape: {data.shape}")
+        print(f"Predict input - Columns: {list(data.columns)}")
+        
+        # CRITICAL: Check and report data types in prediction
+        print("Data types in prediction:")
+        for col in data.columns:
+            print(f"  {col}: {data[col].dtype}")
+        
+        # CRITICAL: Use the EXACT SAME feature selection logic as training
+        target_candidates = ['chf_exp', 'CHF_exp', 'CHF', 'target']
+        target_col = None
+        for candidate in target_candidates:
+            matching_cols = [col for col in data.columns if candidate.lower() in col.lower()]
+            if matching_cols:
+                target_col = matching_cols[0]
+                break
+        
+        # Identify feature columns EXACTLY like in training
         exclude_patterns = ['chf', 'target', 'cluster', 'label', 'id']
         feature_cols = []
         
         for col in data.columns:
+            if target_col and col == target_col:
+                continue
             if any(pattern in col.lower() for pattern in exclude_patterns):
                 continue
             feature_cols.append(col)
         
-        X = data[feature_cols].values.astype(np.float32)
-        X_scaled = self.input_scaler.transform(X)
-        X_tensor = torch.tensor(X_scaled, dtype=torch.float32).to(self.device)
+        print(f"Predict - Using feature columns: {feature_cols}")
+        print(f"Predict - Expected {self.input_size} features, got {len(feature_cols)}")
         
-        self.model.eval()
-        with torch.no_grad():
-            predictions_scaled = self.model(X_tensor).squeeze().cpu().numpy()
+        if len(feature_cols) != self.input_size:
+            raise ValueError(f"Feature mismatch! Expected {self.input_size} features, got {len(feature_cols)}. "
+                           f"Training features: {self.input_size}, Test features: {len(feature_cols)}")
         
-        # Convert back to physical units
-        if predictions_scaled.ndim == 0:
-            predictions_scaled = predictions_scaled.reshape(-1)
-        
-        predictions_scaled = predictions_scaled.reshape(-1, 1)
-        predictions = self.target_scaler.inverse_transform(predictions_scaled).flatten()
-        
-        return predictions
+        try:
+            # CRITICAL FIX: Force consistent data types like in training
+            data_copy = data.copy()
+            
+            # Convert feature columns to float64 first, then float32
+            for col in feature_cols:
+                if data_copy[col].dtype != np.float64:
+                    print(f"Converting {col} from {data_copy[col].dtype} to float64")
+                    data_copy[col] = data_copy[col].astype(np.float64)
+            
+            X = data_copy[feature_cols].values.astype(np.float32)
+            print(f"Predict - After type conversion - X dtype: {X.dtype}")
+            print(f"Predict - Raw data range: [{X.min():.6f}, {X.max():.6f}]")
+            
+            # Feature-wise ranges for debugging
+            print("Feature-wise ranges in prediction:")
+            for i, col in enumerate(feature_cols):
+                print(f"  {col}: [{X[:, i].min():.6f}, {X[:, i].max():.6f}]")
+            
+            # Check for missing values
+            if np.isnan(X).any():
+                print("Warning: Found NaN values in prediction data")
+                X = np.nan_to_num(X, nan=np.nanmean(X, axis=0))
+            
+            X_scaled = self.input_scaler.transform(X)
+            print(f"Predict - Scaled data range: [{X_scaled.min():.6f}, {X_scaled.max():.6f}]")
+            
+            # Check for scaling issues
+            if np.abs(X_scaled).max() > 10:
+                print(f"WARNING: Very large scaled values detected! Max: {np.abs(X_scaled).max()}")
+                print("This suggests data distribution mismatch between training and testing")
+            
+            X_tensor = torch.tensor(X_scaled, dtype=torch.float32).to(self.device)
+            
+            self.model.eval()
+            with torch.no_grad():
+                predictions_scaled = self.model(X_tensor).squeeze().cpu().numpy()
+            
+            print(f"Predict - Model output range: [{predictions_scaled.min():.6f}, {predictions_scaled.max():.6f}]")
+            
+            # Convert back to physical units
+            if predictions_scaled.ndim == 0:
+                predictions_scaled = predictions_scaled.reshape(-1)
+            
+            predictions_scaled = predictions_scaled.reshape(-1, 1)
+            predictions = self.target_scaler.inverse_transform(predictions_scaled).flatten()
+            
+            print(f"Predict - Final predictions range: [{predictions.min():.6f}, {predictions.max():.6f}]")
+            
+            return predictions
+            
+        except Exception as e:
+            print(f"Prediction error: {e}")
+            print(f"Available columns: {list(data.columns)}")
+            print(f"Selected features: {feature_cols}")
+            print("Data type info:")
+            for col in feature_cols:
+                if col in data.columns:
+                    print(f"  {col}: {data[col].dtype}, range [{data[col].min()}, {data[col].max()}]")
+            raise
 
     def get_physics_parameters(self) -> Dict[str, float]:
         """Get current physics parameters."""
@@ -534,9 +655,16 @@ class Pinn:
         return {name: param.item() for name, param in params.items()}
 
     def save(self, path: Path, metadata: Dict[str, Any] = None):
-        """Save model with all necessary components."""
+        """Save model with all necessary components and debugging info."""
         if self.model is None:
             raise ValueError("Model not initialized")
+        
+        # Get current feature info for debugging
+        try:
+            # Try to get feature column info from the last training
+            current_features = getattr(self, '_last_feature_cols', None)
+        except:
+            current_features = None
         
         save_dict = {
             'model_state': self.model.state_dict(),
@@ -551,7 +679,9 @@ class Pinn:
             'target_scaler': self.target_scaler,
             'loss_history': self.loss_history,
             'physics_param_bounds': self.chf_param_bounds,
-            'expected_features': self.expected_features
+            'expected_features': self.expected_features,
+            'last_feature_cols': current_features,  # Save for debugging
+            'scaler_feature_names': getattr(self.input_scaler, 'feature_names_in_', None)
         }
         
         if metadata:
@@ -559,7 +689,25 @@ class Pinn:
         
         path = Path(path).with_suffix('.pth')
         torch.save(save_dict, path, pickle_protocol=pickle.HIGHEST_PROTOCOL)
+        
         print(f"✓ Saved PINN model to {path}")
+        print(f"  - Input size: {self.input_size}")
+        print(f"  - Epoch: {self.epoch}")
+        if current_features:
+            print(f"  - Feature columns: {current_features}")
+        
+        # Save input scaler info separately for debugging
+        scaler_info = {
+            'mean_': self.input_scaler.mean_,
+            'scale_': self.input_scaler.scale_,
+            'var_': self.input_scaler.var_,
+            'n_features_in_': self.input_scaler.n_features_in_
+        }
+        
+        scaler_path = path.with_suffix('.scaler_info.pkl')
+        with open(scaler_path, 'wb') as f:
+            pickle.dump(scaler_info, f)
+        print(f"✓ Saved scaler info to {scaler_path}")
 
     def load(self, path: Path):
         """Load model with proper restoration."""
