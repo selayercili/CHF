@@ -563,7 +563,7 @@ class Pinn:
 
     def load(self, path: Path):
         """Load model with proper restoration."""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
         # Restore configuration
         self.input_size = checkpoint['input_size']
