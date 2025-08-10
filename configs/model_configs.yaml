@@ -101,6 +101,25 @@ pinn:
     checkpoint_frequency: 10  # Save every N epochs
     debug: true  # Enable physics loss debugging
 
+gaussian_process:
+  init_params:
+    alpha: 1e-10
+    n_restarts_optimizer: 5
+    normalize_y: true
+    random_state: 42
+    # kernel will use default: ConstantKernel * RBF + WhiteKernel
+  
+  training:
+    epochs: 3  # GP doesn't need many epochs
+    batch_size: 32  # Not used but required by interface
+    early_stopping_patience: 2
+  
+  tuning:
+    method: 'random'
+    n_iter: 8  # Keep low - GP tuning is expensive
+    cv: 3  # Fewer folds for computational efficiency
+    scoring: 'neg_mean_squared_error'
+
 # Global training settings
 global_settings:
   random_seed: 42
