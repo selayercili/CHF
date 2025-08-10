@@ -6,6 +6,7 @@ from .lightgbm import Lightgbm
 from .neural_network import NeuralNetwork
 from .svm import Svm
 from .pinn import Pinn
+from .gpr import GaussianProcess
 
 # Model registry for easy access
 model_registry = {
@@ -13,7 +14,8 @@ model_registry = {
     'lightgbm': Lightgbm,
     'neural_network': NeuralNetwork,
     'svm': Svm,
-    'pinn': Pinn
+    'pinn': Pinn,
+    'gpr' : GaussianProcess
 }
 
 # Export all models and registry
@@ -23,5 +25,6 @@ __all__ = [
     'NeuralNetwork',
     'Svm',
     'Pinn',
+    'gpr',
     'model_registry'
 ]

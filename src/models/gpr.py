@@ -213,12 +213,17 @@ class GaussianProcess:
         Returns:
             Dictionary of training metrics
         """
+        print(f"🔧 Training Gaussian Process - Epoch {self.epoch + 1}")
+        
         # Perform tuning if configured and not fitted yet
         if not self.is_fitted and self.tuning_params:
+            print("🔍 Performing hyperparameter tuning...")
             self.tune(train_data)
-            return self.validate(train_data)  # Return validation metrics after tuning
+            # Don't return early - continue with normal training
         
         X_train, y_train = self._prepare_data(train_data, fit_scaler=not self.is_fitted)
+        
+        print(f"📊 Training data shape: {X_train.shape}, Target shape: {y_train.shape}")
         
         # Store training data for feature importance calculation
         self.train_X = X_train
@@ -226,18 +231,26 @@ class GaussianProcess:
         
         # For Gaussian Process, we fit the entire model at once
         if not self.is_fitted:
+            print("🚀 Fitting Gaussian Process (this may take a while)...")
             if self.logger:
                 self.logger.info("Fitting Gaussian Process (this may take a while)...")
             
-            self.model.fit(X_train, y_train)
-            self.is_fitted = True
+            try:
+                self.model.fit(X_train, y_train)
+                self.is_fitted = True
+                print("✅ Gaussian Process fitted successfully!")
+            except Exception as e:
+                print(f"❌ Error fitting Gaussian Process: {str(e)}")
+                raise
         else:
             # For subsequent epochs, we refit (GP doesn't have incremental learning)
+            print("🔄 Refitting Gaussian Process...")
             self.model.fit(X_train, y_train)
         
         self.epoch += 1
         
         # Calculate training metrics
+        print("📈 Calculating training metrics...")
         predictions = self.model.predict(X_train)
         
         if self.task_type == 'regression':
@@ -251,9 +264,12 @@ class GaussianProcess:
             metrics = {'loss': mse, 'rmse': rmse, 'mae': mae}
             if log_likelihood is not None:
                 metrics['log_marginal_likelihood'] = log_likelihood
+                
+            print(f"📊 Training metrics: RMSE={rmse:.6f}, MAE={mae:.6f}")
         else:
             accuracy = np.mean(predictions == y_train)
             metrics = {'loss': 1 - accuracy, 'accuracy': accuracy}
+            print(f"📊 Training metrics: Accuracy={accuracy:.6f}")
         
         return metrics
     
@@ -377,11 +393,22 @@ class GaussianProcess:
         if not path.suffix:
             path = path.with_suffix('.pkl')
         
-        with open(path, 'wb') as f:
-            pickle.dump(save_dict, f)
+        # Create parent directory if it doesn't exist
+        path.parent.mkdir(parents=True, exist_ok=True)
         
-        if self.logger:
-            self.logger.info(f"Saved Gaussian Process model to {path}")
+        try:
+            with open(path, 'wb') as f:
+                pickle.dump(save_dict, f)
+            
+            print(f"✓ Saved Gaussian Process model to {path}")
+            if self.logger:
+                self.logger.info(f"Saved Gaussian Process model to {path}")
+        except Exception as e:
+            error_msg = f"Failed to save model to {path}: {str(e)}"
+            print(f"✗ {error_msg}")
+            if self.logger:
+                self.logger.error(error_msg)
+            raise
     
     def load(self, path: Path):
         """
