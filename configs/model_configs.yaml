@@ -101,7 +101,7 @@ pinn:
     checkpoint_frequency: 10  # Save every N epochs
     debug: true  # Enable physics loss debugging
 
-gaussian_process:
+gpr:
   init_params:
     alpha: 1e-10
     n_restarts_optimizer: 3
