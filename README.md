@@ -327,9 +327,9 @@ If you use this code in your research, please cite:
 ```bibtex
 @software{chf_prediction,
   title = {Critical Heat Flux Prediction Framework},
-  author = {Your Name},
+  author = {Selay Ercili},
   year = {2024},
-  url = {https://github.com/yourusername/chf}
+  url = {https://github.com/selayercili/chf}
 }
 ```
 
