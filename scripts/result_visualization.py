@@ -577,26 +577,58 @@ class ResultVisualizer:
             print("Loading comparison data...")
             comparison_df = self.load_comparison_data()
             print(f"Loaded comparison data: {comparison_df.shape}")
+            print(f"Columns: {comparison_df.columns.tolist()}")
             
             print("Loading detailed results...")
             detailed_results = self.load_detailed_results()
             print(f"Loaded detailed results for {len(detailed_results)} model-data combinations")
             
-            # Create visualizations
-            self.create_prediction_scatter_plots(detailed_results)
-            self.create_radar_chart(comparison_df)
-            self.create_residual_plots(detailed_results)
-            self.create_feature_importance_heatmap(detailed_results)
-            self.create_performance_comparison_bar_plot(comparison_df)
-            self.create_error_distribution_plots(detailed_results)
+            # Create visualizations one by one with error handling
+            try:
+                print("\n1. Creating prediction scatter plots...")
+                self.create_prediction_scatter_plots(detailed_results)
+            except Exception as e:
+                print(f"Error in prediction scatter plots: {str(e)}")
+            
+            try:
+                print("\n2. Creating radar chart...")
+                self.create_radar_chart(comparison_df)
+            except Exception as e:
+                print(f"Error in radar chart: {str(e)}")
+            
+            try:
+                print("\n3. Creating residual plots...")
+                self.create_residual_plots(detailed_results)
+            except Exception as e:
+                print(f"Error in residual plots: {str(e)}")
+            
+            try:
+                print("\n4. Creating feature importance heatmap...")
+                self.create_feature_importance_heatmap(detailed_results)
+            except Exception as e:
+                print(f"Error in feature importance heatmap: {str(e)}")
+            
+            try:
+                print("\n5. Creating performance comparison bar plots...")
+                self.create_performance_comparison_bar_plot(comparison_df)
+            except Exception as e:
+                print(f"Error in performance bar plots: {str(e)}")
+            
+            try:
+                print("\n6. Creating error distribution plots...")
+                self.create_error_distribution_plots(detailed_results)
+            except Exception as e:
+                print(f"Error in error distribution plots: {str(e)}")
             
             print("\n" + "="*60)
-            print("All visualizations completed successfully!")
+            print("Visualization generation completed!")
             print(f"Plots saved to: {self.output_dir}")
             print("="*60)
             
         except Exception as e:
             print(f"Error during visualization: {str(e)}")
+            import traceback
+            traceback.print_exc()
             raise
 
 
