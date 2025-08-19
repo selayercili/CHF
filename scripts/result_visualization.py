@@ -171,16 +171,16 @@ class ResultVisualizer:
         return self.filter_excluded_results(detailed_results)
     
     def create_prediction_scatter_plots(self, detailed_results: Dict[str, Dict[str, Any]]):
-        """Create prediction vs actual scatter plots."""
+        """Create prediction vs actual scatter plots with density visualization."""
         print("Creating prediction vs actual scatter plots...")
         
         # Create subplots based on data type
         if self.data_type == 'both':
-            fig, axes = plt.subplots(2, 1, figsize=(12, 16))
+            fig, axes = plt.subplots(2, 1, figsize=(14, 18))
             axes = axes.flatten()
             data_types = ['regular', 'smote']
         else:
-            fig, ax = plt.subplots(1, 1, figsize=(12, 8))
+            fig, ax = plt.subplots(1, 1, figsize=(14, 10))
             axes = [ax]
             data_types = [self.data_type]
         
@@ -204,47 +204,183 @@ class ResultVisualizer:
             min_val = min(min(all_actual), min(all_pred))
             max_val = max(max(all_actual), max(all_pred))
             
+            # Create a subplot grid for each model
+            n_models = len(dt_results)
+            if n_models > 1:
+                # Create multiple subplots for this data type
+                model_fig, model_axes = plt.subplots(1, n_models, figsize=(6*n_models, 6))
+                if n_models == 1:
+                    model_axes = [model_axes]
+            
             # Plot each model
+            model_idx = 0
             for key, result in dt_results.items():
                 model = result['model']
                 df = result['predictions']
                 
+                if n_models > 1:
+                    model_ax = model_axes[model_idx]
+                else:
+                    model_ax = ax
+                
                 color = self.model_colors.get(model, '#999999')
-                ax.scatter(df['actual'], df['predicted'], 
-                          alpha=0.6, s=30, color=color, label=model.upper(),
-                          edgecolors='white', linewidth=0.5)
-            
-            # Perfect prediction line
-            ax.plot([min_val, max_val], [min_val, max_val], 
-                   'k--', alpha=0.8, linewidth=2, label='Perfect Prediction')
-            
-            # Formatting
-            ax.set_xlabel('Actual CHF (MW/m²)', fontsize=12)
-            ax.set_ylabel('Predicted CHF (MW/m²)', fontsize=12)
-            ax.set_title(f'Prediction vs Actual - {dt.upper()} Data', 
-                        fontsize=14, fontweight='bold')
-            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-            ax.grid(True, alpha=0.3)
-            ax.set_aspect('equal', adjustable='box')
-            
-            # Add R² text for each model
-            y_pos = 0.95
-            for key, result in dt_results.items():
-                model = result['model']
+                
+                # Create hexbin plot for better density visualization
+                hb = model_ax.hexbin(df['actual'], df['predicted'], 
+                                   gridsize=30, cmap='Blues', alpha=0.8,
+                                   extent=[min_val, max_val, min_val, max_val])
+                
+                # Add colorbar for hexbin
+                if n_models > 1:
+                    model_fig.colorbar(hb, ax=model_ax, label='Point Density')
+                else:
+                    fig.colorbar(hb, ax=model_ax, label='Point Density')
+                
+                # Perfect prediction line
+                model_ax.plot([min_val, max_val], [min_val, max_val], 
+                           'r--', alpha=0.8, linewidth=2, label='Perfect Prediction')
+                
+                # Add confidence bands (optional)
+                # 10% error bands
+                upper_10 = np.array([min_val, max_val]) * 1.1
+                lower_10 = np.array([min_val, max_val]) * 0.9
+                model_ax.fill_between([min_val, max_val], lower_10, upper_10, 
+                                    alpha=0.1, color='red', label='±10% Error Band')
+                
+                # Formatting
+                model_ax.set_xlabel('Actual CHF (MW/m²)', fontsize=12)
+                model_ax.set_ylabel('Predicted CHF (MW/m²)', fontsize=12)
+                
+                if n_models > 1:
+                    model_ax.set_title(f'{model.upper()} - {dt.upper()} Data', 
+                                     fontsize=14, fontweight='bold')
+                else:
+                    model_ax.set_title(f'Prediction vs Actual - {dt.upper()} Data', 
+                                     fontsize=14, fontweight='bold')
+                
+                model_ax.legend(loc='upper left')
+                model_ax.grid(True, alpha=0.3)
+                model_ax.set_aspect('equal', adjustable='box')
+                
+                # Add R² and RMSE text
                 r2 = result['metrics'].get('r2', 0)
-                color = self.model_colors.get(model, '#999999')
-                ax.text(0.02, y_pos, f'{model.upper()}: R² = {r2:.4f}', 
-                       transform=ax.transAxes, fontsize=10,
-                       bbox=dict(boxstyle='round', facecolor=color, alpha=0.2))
-                y_pos -= 0.05
+                rmse = result['metrics'].get('rmse', 0)
+                model_ax.text(0.02, 0.95, f'R² = {r2:.4f}\nRMSE = {rmse:.4f}', 
+                           transform=model_ax.transAxes, fontsize=11,
+                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
+                           verticalalignment='top')
+                
+                model_idx += 1
+            
+            # Save individual model plots if multiple models
+            if n_models > 1:
+                plt.figure(model_fig.number)
+                plt.tight_layout()
+                plot_path = self.output_dir / f'prediction_vs_actual_hexbin_{dt}.png'
+                plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+                plt.close(model_fig)
+                print(f"Saved: {plot_path}")
+            
+            # Also create a combined overlay plot
+            if n_models > 1:
+                for key, result in dt_results.items():
+                    model = result['model']
+                    df = result['predictions']
+                    
+                    color = self.model_colors.get(model, '#999999')
+                    ax.scatter(df['actual'], df['predicted'], 
+                              alpha=0.4, s=15, color=color, label=model.upper(),
+                              edgecolors='none')
+                
+                # Perfect prediction line
+                ax.plot([min_val, max_val], [min_val, max_val], 
+                       'k--', alpha=0.8, linewidth=2, label='Perfect Prediction')
+                
+                # Formatting
+                ax.set_xlabel('Actual CHF (MW/m²)', fontsize=12)
+                ax.set_ylabel('Predicted CHF (MW/m²)', fontsize=12)
+                ax.set_title(f'All Models Comparison - {dt.upper()} Data', 
+                            fontsize=14, fontweight='bold')
+                ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                ax.grid(True, alpha=0.3)
+                ax.set_aspect('equal', adjustable='box')
         
-        plt.tight_layout()
-        plot_path = self.output_dir / f'prediction_vs_actual_{self.data_type}.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"Saved: {plot_path}")
+        # Save combined plot
+        if self.data_type == 'both' or n_models > 1:
+            plt.figure(fig.number)
+            plt.tight_layout()
+            plot_path = self.output_dir / f'prediction_vs_actual_combined_{self.data_type}.png'
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"Saved: {plot_path}")
+        
+        # Create an alternative: 2D histogram plot
+        self.create_density_scatter_plots(detailed_results)
     
-    def create_radar_chart(self, comparison_df: pd.DataFrame):
+    def create_density_scatter_plots(self, detailed_results: Dict[str, Dict[str, Any]]):
+        """Create 2D histogram/density scatter plots for better point visibility."""
+        print("Creating density scatter plots...")
+        
+        for dt in (['regular', 'smote'] if self.data_type == 'both' else [self.data_type]):
+            dt_results = {k: v for k, v in detailed_results.items() 
+                         if v['data_type'] == dt}
+            
+            if not dt_results:
+                continue
+            
+            n_models = len(dt_results)
+            fig, axes = plt.subplots(1, n_models, figsize=(6*n_models, 6))
+            if n_models == 1:
+                axes = [axes]
+            
+            for idx, (key, result) in enumerate(dt_results.items()):
+                model = result['model']
+                df = result['predictions']
+                ax = axes[idx]
+                
+                # Create 2D histogram
+                h = ax.hist2d(df['actual'], df['predicted'], bins=50, 
+                            cmap='YlOrRd', alpha=0.8)
+                
+                # Add colorbar
+                fig.colorbar(h[3], ax=ax, label='Point Count')
+                
+                # Perfect prediction line
+                min_val = min(df['actual'].min(), df['predicted'].min())
+                max_val = max(df['actual'].max(), df['predicted'].max())
+                ax.plot([min_val, max_val], [min_val, max_val], 
+                       'blue', linestyle='--', linewidth=2, label='Perfect Prediction')
+                
+                # Add error bands
+                margin = (max_val - min_val) * 0.1
+                upper_10 = np.linspace(min_val, max_val, 100) * 1.1
+                lower_10 = np.linspace(min_val, max_val, 100) * 0.9
+                ax.fill_between(np.linspace(min_val, max_val, 100), 
+                              lower_10, upper_10, alpha=0.2, 
+                              color='gray', label='±10% Error Band')
+                
+                # Formatting
+                ax.set_xlabel('Actual CHF (MW/m²)', fontsize=12)
+                ax.set_ylabel('Predicted CHF (MW/m²)', fontsize=12)
+                ax.set_title(f'{model.upper()} - {dt.upper()} Data (Density)', 
+                           fontsize=14, fontweight='bold')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                ax.set_aspect('equal', adjustable='box')
+                
+                # Add metrics
+                r2 = result['metrics'].get('r2', 0)
+                rmse = result['metrics'].get('rmse', 0)
+                ax.text(0.02, 0.95, f'R² = {r2:.4f}\nRMSE = {rmse:.4f}', 
+                       transform=ax.transAxes, fontsize=11,
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.9),
+                       verticalalignment='top')
+            
+            plt.tight_layout()
+            plot_path = self.output_dir / f'prediction_density_{dt}.png'
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"Saved: {plot_path}")
         """Create radar/spider chart comparing models across multiple metrics."""
         print("Creating radar chart...")
         
