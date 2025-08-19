@@ -462,20 +462,45 @@ class ResultVisualizer:
             if self.data_type == 'both' and 'data_type' in comparison_df.columns:
                 # Group by model and data type
                 pivot_df = comparison_df.pivot_table(index='model', columns='data_type', values=metric)
-                pivot_df.plot(kind='bar', ax=ax, color=[self.data_type_colors.get('regular', '#3498DB'), 
-                                                      self.data_type_colors.get('smote', '#E74C3C')])
+                
+                # Get the positions for bars
+                x_pos = np.arange(len(pivot_df.index))
+                width = 0.35
+                
+                # Check which data types are available
+                data_types = pivot_df.columns.tolist()
+                
+                if 'regular' in data_types:
+                    regular_values = pivot_df['regular'].values
+                    ax.bar(x_pos - width/2, regular_values, width, 
+                          label='Regular', color=self.data_type_colors.get('regular', '#3498DB'))
+                
+                if 'smote' in data_types:
+                    smote_values = pivot_df['smote'].values
+                    ax.bar(x_pos + width/2, smote_values, width,
+                          label='SMOTE', color=self.data_type_colors.get('smote', '#E74C3C'))
+                
+                ax.set_xticks(x_pos)
+                ax.set_xticklabels([model.upper() for model in pivot_df.index], rotation=45)
+                ax.legend(title='Data Type')
+                
             else:
                 # Single data type
-                comparison_df.set_index('model')[metric].plot(kind='bar', ax=ax)
+                models = comparison_df['model'].values
+                values = comparison_df[metric].values
+                
+                # Create colors for each model
+                colors = [self.model_colors.get(model, '#999999') for model in models]
+                
+                x_pos = np.arange(len(models))
+                ax.bar(x_pos, values, color=colors)
+                ax.set_xticks(x_pos)
+                ax.set_xticklabels([model.upper() for model in models], rotation=45)
             
             ax.set_title(f'{metric.upper()} Comparison', fontsize=14, fontweight='bold')
             ax.set_ylabel(metric.upper(), fontsize=12)
             ax.set_xlabel('Model', fontsize=12)
-            ax.tick_params(axis='x', rotation=45)
             ax.grid(True, alpha=0.3)
-            
-            if self.data_type == 'both':
-                ax.legend(title='Data Type')
         
         plt.tight_layout()
         plot_path = self.output_dir / f'performance_bars_{self.data_type}.png'
