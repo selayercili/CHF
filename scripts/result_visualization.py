@@ -47,10 +47,13 @@ class ResultVisualizer:
         self.output_dir = output_dir
         self.output_dir.mkdir(exist_ok=True, parents=True)
         
+        # Models to exclude from visualizations
+        self.excluded_models = ['pinn']  # Add models to exclude here
+        
         # Define colors for each model
         self.model_colors = {
             'neural_network': '#FF6B6B',  # Red
-            'pinn': '#4ECDC4',           # Teal
+            'pinn': '#4ECDC4',           # Teal (excluded)
             'lightgbm': '#45B7D1',       # Blue
             'svm': '#96CEB4',            # Green
             'xgboost': '#FFEAA7',        # Yellow
@@ -80,13 +83,31 @@ class ResultVisualizer:
         print(f"Initialized ResultVisualizer for {data_type} data")
         print(f"Output directory: {output_dir}")
     
+    def filter_excluded_models(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Filter out excluded models from dataframe."""
+        if 'model' in df.columns:
+            return df[~df['model'].isin(self.excluded_models)]
+        return df
+    
+    def filter_excluded_results(self, results_dict: Dict) -> Dict:
+        """Filter out excluded models from results dictionary."""
+        filtered_results = {}
+        for key, value in results_dict.items():
+            if isinstance(value, dict) and 'model' in value:
+                if value['model'] not in self.excluded_models:
+                    filtered_results[key] = value
+            else:
+                # If it's not a model result, keep it
+                filtered_results[key] = value
+        return filtered_results
     def load_comparison_data(self) -> pd.DataFrame:
         """Load model comparison data from CSV."""
         if self.data_type == 'both':
             # Try to load combined comparison first
             combined_path = Path("results/combined_comparison/all_models_comparison.csv")
             if combined_path.exists():
-                return pd.read_csv(combined_path)
+                df = pd.read_csv(combined_path)
+                return self.filter_excluded_models(df)
             
             # If not available, combine from individual folders
             dfs = []
@@ -94,6 +115,7 @@ class ResultVisualizer:
                 path = Path(f"results_{data_type}/model_comparison.csv")
                 if path.exists():
                     df = pd.read_csv(path)
+                    df = self.filter_excluded_models(df)
                     dfs.append(df)
             
             if dfs:
@@ -105,7 +127,8 @@ class ResultVisualizer:
             path = Path(f"results_{self.data_type}/model_comparison.csv")
             if not path.exists():
                 raise FileNotFoundError(f"Comparison data not found: {path}")
-            return pd.read_csv(path)
+            df = pd.read_csv(path)
+            return self.filter_excluded_models(df)
     
     def load_detailed_results(self) -> Dict[str, Dict[str, Any]]:
         """Load detailed results from individual model folders."""
@@ -145,7 +168,7 @@ class ResultVisualizer:
                             'metrics': metrics
                         }
         
-        return detailed_results
+        return self.filter_excluded_results(detailed_results)
     
     def create_prediction_scatter_plots(self, detailed_results: Dict[str, Dict[str, Any]]):
         """Create prediction vs actual scatter plots."""
@@ -238,28 +261,42 @@ class ResultVisualizer:
         for metric in available_metrics:
             if metric == 'r2':
                 # For R², we want higher values, so we'll use 1-normalized_inverse
-                df_radar[f'{metric}_norm'] = df_radar[metric] / df_radar[metric].max()
+                max_val = df_radar[metric].max()
+                if max_val > 0:
+                    df_radar[f'{metric}_norm'] = df_radar[metric] / max_val
+                else:
+                    df_radar[f'{metric}_norm'] = 0
             else:
                 # For error metrics, we want lower values, so we'll use inverse normalization
-                df_radar[f'{metric}_norm'] = 1 - (df_radar[metric] - df_radar[metric].min()) / \
-                                           (df_radar[metric].max() - df_radar[metric].min())
+                min_val = df_radar[metric].min()
+                max_val = df_radar[metric].max()
+                if max_val > min_val:
+                    df_radar[f'{metric}_norm'] = 1 - (df_radar[metric] - min_val) / (max_val - min_val)
+                else:
+                    df_radar[f'{metric}_norm'] = 1
         
         # Create radar chart
-        if self.data_type == 'both':
+        if self.data_type == 'both' and 'data_type' in comparison_df.columns:
             fig, axes = plt.subplots(1, 2, figsize=(16, 8), subplot_kw=dict(projection='polar'))
             data_types = ['regular', 'smote']
         else:
             fig, ax = plt.subplots(1, 1, figsize=(10, 10), subplot_kw=dict(projection='polar'))
             axes = [ax]
-            data_types = [self.data_type]
+            data_types = [self.data_type] if self.data_type != 'both' else ['combined']
         
         angles = np.linspace(0, 2 * np.pi, len(available_metrics), endpoint=False).tolist()
         angles += angles[:1]  # Complete the circle
         
         for idx, dt in enumerate(data_types):
-            ax = axes[idx] if isinstance(axes, list) else axes
+            if len(axes) > 1:
+                ax = axes[idx]
+            else:
+                ax = axes[0]
             
-            dt_data = df_radar[df_radar['data_type'] == dt] if 'data_type' in df_radar.columns else df_radar
+            if self.data_type == 'both' and 'data_type' in df_radar.columns:
+                dt_data = df_radar[df_radar['data_type'] == dt]
+            else:
+                dt_data = df_radar
             
             for _, row in dt_data.iterrows():
                 model = row['model']
@@ -278,7 +315,10 @@ class ResultVisualizer:
             ax.set_yticklabels(['0.2', '0.4', '0.6', '0.8', '1.0'])
             ax.grid(True)
             
-            title = f'Model Performance Radar - {dt.upper()} Data' if self.data_type == 'both' else 'Model Performance Radar'
+            if self.data_type == 'both':
+                title = f'Model Performance Radar - {dt.upper()} Data'
+            else:
+                title = 'Model Performance Radar'
             ax.set_title(title, size=14, fontweight='bold', pad=20)
             ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.0))
         
@@ -577,6 +617,8 @@ class ResultVisualizer:
             print("Loading comparison data...")
             comparison_df = self.load_comparison_data()
             print(f"Loaded comparison data: {comparison_df.shape}")
+            print(f"Models included: {comparison_df['model'].unique().tolist() if 'model' in comparison_df.columns else 'N/A'}")
+            print(f"Models excluded: {self.excluded_models}")
             print(f"Columns: {comparison_df.columns.tolist()}")
             
             print("Loading detailed results...")
