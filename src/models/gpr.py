@@ -388,9 +388,12 @@ class GaussianProcess:
         if metadata:
             save_dict['metadata'] = metadata
         
-        # Ensure path has .pkl extension
+        # Ensure path has .pkl extension (GPR models use pickle, not .pth)
         path = Path(path)
         if not path.suffix:
+            path = path.with_suffix('.pkl')
+        elif path.suffix == '.pth':
+            # Replace .pth with .pkl for GPR models
             path = path.with_suffix('.pkl')
         
         # Create parent directory if it doesn't exist
@@ -400,12 +403,12 @@ class GaussianProcess:
             with open(path, 'wb') as f:
                 pickle.dump(save_dict, f)
             
-            print(f"✓ Saved Gaussian Process model to {path}")
+            print(f"✅ Saved Gaussian Process model to {path}")
             if self.logger:
                 self.logger.info(f"Saved Gaussian Process model to {path}")
         except Exception as e:
             error_msg = f"Failed to save model to {path}: {str(e)}"
-            print(f"✗ {error_msg}")
+            print(f"❌ {error_msg}")
             if self.logger:
                 self.logger.error(error_msg)
             raise
@@ -421,24 +424,46 @@ class GaussianProcess:
             Dictionary of metadata
         """
         path = Path(path)
+        
+        # Handle both .pth and .pkl extensions for compatibility
         if not path.exists():
-            raise FileNotFoundError(f"Model file not found: {path}")
+            # Try .pkl if .pth doesn't exist
+            if path.suffix == '.pth':
+                pkl_path = path.with_suffix('.pkl')
+                if pkl_path.exists():
+                    path = pkl_path
+                else:
+                    raise FileNotFoundError(f"Model file not found: {path} or {pkl_path}")
+            else:
+                raise FileNotFoundError(f"Model file not found: {path}")
         
-        with open(path, 'rb') as f:
-            save_dict = pickle.load(f)
-        
-        self.model = save_dict['model']
-        self.task_type = save_dict['task_type']
-        self.is_fitted = save_dict['is_fitted']
-        self.epoch = save_dict.get('epoch', 0)
-        self.params = save_dict.get('params', {})
-        self.tuning_params = save_dict.get('tuning_params', {})
-        self.feature_names = save_dict.get('feature_names', None)
-        self.feature_scaler = save_dict.get('feature_scaler', StandardScaler())
-        self.train_X = save_dict.get('train_X', None)
-        self.train_y = save_dict.get('train_y', None)
-        
-        return save_dict.get('metadata', {})
+        try:
+            with open(path, 'rb') as f:
+                save_dict = pickle.load(f)
+            
+            self.model = save_dict['model']
+            self.task_type = save_dict['task_type']
+            self.is_fitted = save_dict['is_fitted']
+            self.epoch = save_dict.get('epoch', 0)
+            self.params = save_dict.get('params', {})
+            self.tuning_params = save_dict.get('tuning_params', {})
+            self.feature_names = save_dict.get('feature_names', None)
+            self.feature_scaler = save_dict.get('feature_scaler', StandardScaler())
+            self.train_X = save_dict.get('train_X', None)
+            self.train_y = save_dict.get('train_y', None)
+            
+            print(f"✅ Loaded Gaussian Process model from {path}")
+            if self.logger:
+                self.logger.info(f"Loaded Gaussian Process model from {path}")
+            
+            return save_dict.get('metadata', {})
+            
+        except Exception as e:
+            error_msg = f"Failed to load model from {path}: {str(e)}"
+            print(f"❌ {error_msg}")
+            if self.logger:
+                self.logger.error(error_msg)
+            raise
     
     def get_feature_importance(self, method: str = 'permutation') -> pd.DataFrame:
         """
