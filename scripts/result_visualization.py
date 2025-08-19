@@ -100,6 +100,7 @@ class ResultVisualizer:
                 # If it's not a model result, keep it
                 filtered_results[key] = value
         return filtered_results
+    
     def load_comparison_data(self) -> pd.DataFrame:
         """Load model comparison data from CSV."""
         if self.data_type == 'both':
@@ -206,6 +207,9 @@ class ResultVisualizer:
             
             # Create a subplot grid for each model
             n_models = len(dt_results)
+            model_fig = None
+            model_axes = None
+            
             if n_models > 1:
                 # Create multiple subplots for this data type
                 model_fig, model_axes = plt.subplots(1, n_models, figsize=(6*n_models, 6))
@@ -218,7 +222,7 @@ class ResultVisualizer:
                 model = result['model']
                 df = result['predictions']
                 
-                if n_models > 1:
+                if n_models > 1 and model_axes is not None:
                     model_ax = model_axes[model_idx]
                 else:
                     model_ax = ax
@@ -231,7 +235,7 @@ class ResultVisualizer:
                                    extent=[min_val, max_val, min_val, max_val])
                 
                 # Add colorbar for hexbin
-                if n_models > 1:
+                if n_models > 1 and model_fig is not None:
                     model_fig.colorbar(hb, ax=model_ax, label='Point Density')
                 else:
                     fig.colorbar(hb, ax=model_ax, label='Point Density')
@@ -251,7 +255,7 @@ class ResultVisualizer:
                 model_ax.set_xlabel('Actual CHF (MW/m²)', fontsize=12)
                 model_ax.set_ylabel('Predicted CHF (MW/m²)', fontsize=12)
                 
-                if n_models > 1:
+                if n_models > 1 and model_fig is not None:
                     model_ax.set_title(f'{model.upper()} - {dt.upper()} Data', 
                                      fontsize=14, fontweight='bold')
                 else:
@@ -273,7 +277,7 @@ class ResultVisualizer:
                 model_idx += 1
             
             # Save individual model plots if multiple models
-            if n_models > 1:
+            if n_models > 1 and model_fig is not None:
                 plt.figure(model_fig.number)
                 plt.tight_layout()
                 plot_path = self.output_dir / f'prediction_vs_actual_hexbin_{dt}.png'
@@ -281,7 +285,7 @@ class ResultVisualizer:
                 plt.close(model_fig)
                 print(f"Saved: {plot_path}")
             
-            # Also create a combined overlay plot
+            # Also create a combined overlay plot on the main axis
             if n_models > 1:
                 for key, result in dt_results.items():
                     model = result['model']
@@ -304,15 +308,17 @@ class ResultVisualizer:
                 ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
                 ax.grid(True, alpha=0.3)
                 ax.set_aspect('equal', adjustable='box')
+            else:
+                # If only one model, the individual plot is already on the main axis
+                pass
         
         # Save combined plot
-        if self.data_type == 'both' or n_models > 1:
-            plt.figure(fig.number)
-            plt.tight_layout()
-            plot_path = self.output_dir / f'prediction_vs_actual_combined_{self.data_type}.png'
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"Saved: {plot_path}")
+        plt.figure(fig.number)
+        plt.tight_layout()
+        plot_path = self.output_dir / f'prediction_vs_actual_combined_{self.data_type}.png'
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved: {plot_path}")
         
         # Create an alternative: 2D histogram plot
         self.create_density_scatter_plots(detailed_results)
@@ -381,6 +387,8 @@ class ResultVisualizer:
             plt.savefig(plot_path, dpi=300, bbox_inches='tight')
             plt.close()
             print(f"Saved: {plot_path}")
+
+    def create_radar_chart(self, comparison_df: pd.DataFrame):
         """Create radar/spider chart comparing models across multiple metrics."""
         print("Creating radar chart...")
         
