@@ -214,6 +214,7 @@ class GaussianProcess:
             Dictionary of training metrics
         """
         print(f"🔧 Training Gaussian Process - Epoch {self.epoch + 1}")
+        print(f"🔧 Model fitted status: {self.is_fitted}")
         
         # Perform tuning if configured and not fitted yet
         if not self.is_fitted and self.tuning_params:
@@ -270,6 +271,16 @@ class GaussianProcess:
             accuracy = np.mean(predictions == y_train)
             metrics = {'loss': 1 - accuracy, 'accuracy': accuracy}
             print(f"📊 Training metrics: Accuracy={accuracy:.6f}")
+        
+        # Manual save for debugging (will be removed later)
+        try:
+            debug_save_dir = Path("debug_gpr_saves")
+            debug_save_dir.mkdir(exist_ok=True)
+            debug_path = debug_save_dir / f"gpr_epoch_{self.epoch}.pkl"
+            self.save(debug_path, metadata={'epoch': self.epoch, 'metrics': metrics})
+            print(f"🐛 DEBUG: Manually saved GPR to {debug_path}")
+        except Exception as e:
+            print(f"🐛 DEBUG: Manual save failed: {e}")
         
         return metrics
     
@@ -408,6 +419,65 @@ class GaussianProcess:
                 self.logger.info(f"Saved Gaussian Process model to {path}")
         except Exception as e:
             error_msg = f"Failed to save model to {path}: {str(e)}"
+            print(f"❌ {error_msg}")
+            if self.logger:
+                self.logger.error(error_msg)
+            raise
+    
+    def save_checkpoint(self, path: Path, epoch: int, metrics: Dict[str, Any] = None, is_best: bool = False):
+        """
+        Save checkpoint (compatibility method for CheckpointManager).
+        
+        Args:
+            path: Path to save the checkpoint
+            epoch: Current epoch number
+            metrics: Training metrics
+            is_best: Whether this is the best model so far
+        """
+        # Update internal epoch
+        self.epoch = epoch
+        
+        # Create checkpoint data
+        checkpoint_data = {
+            'model': self.model,
+            'task_type': self.task_type,
+            'is_fitted': self.is_fitted,
+            'epoch': epoch,
+            'params': self.params,
+            'tuning_params': self.tuning_params,
+            'feature_names': self.feature_names,
+            'feature_scaler': self.feature_scaler,
+            'train_X': self.train_X,
+            'train_y': self.train_y,
+            'metrics': metrics or {},
+            'is_best': is_best
+        }
+        
+        print(f"🔄 GPR save_checkpoint called with path: {path}")
+        print(f"🔄 GPR epoch: {epoch}, is_best: {is_best}")
+        
+        # Ensure path has .pkl extension
+        path = Path(path)
+        if not path.suffix:
+            path = path.with_suffix('.pkl')
+        elif path.suffix == '.pth':
+            path = path.with_suffix('.pkl')
+        
+        print(f"🔄 GPR final save path: {path}")
+        
+        # Create parent directory if it doesn't exist
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            with open(path, 'wb') as f:
+                pickle.dump(checkpoint_data, f)
+            
+            print(f"✅ Saved Gaussian Process checkpoint to {path}")
+            if self.logger:
+                self.logger.info(f"Saved Gaussian Process checkpoint to {path}")
+                
+        except Exception as e:
+            error_msg = f"Failed to save checkpoint to {path}: {str(e)}"
             print(f"❌ {error_msg}")
             if self.logger:
                 self.logger.error(error_msg)
@@ -577,3 +647,49 @@ class GaussianProcess:
             kernel_params = self.model.kernel_.get_params()
         
         return kernel_params
+    
+    def state_dict(self) -> Dict[str, Any]:
+        """
+        Get state dictionary (compatibility with PyTorch-style checkpointing).
+        
+        Returns:
+            Dictionary containing model state
+        """
+        return {
+            'model': self.model,
+            'task_type': self.task_type,
+            'is_fitted': self.is_fitted,
+            'epoch': self.epoch,
+            'params': self.params,
+            'tuning_params': self.tuning_params,
+            'feature_names': self.feature_names,
+            'feature_scaler': self.feature_scaler,
+            'train_X': self.train_X,
+            'train_y': self.train_y
+        }
+    
+    def load_state_dict(self, state_dict: Dict[str, Any]):
+        """
+        Load state dictionary (compatibility with PyTorch-style checkpointing).
+        
+        Args:
+            state_dict: Dictionary containing model state
+        """
+        self.model = state_dict.get('model')
+        self.task_type = state_dict.get('task_type', 'regression')
+        self.is_fitted = state_dict.get('is_fitted', False)
+        self.epoch = state_dict.get('epoch', 0)
+        self.params = state_dict.get('params', {})
+        self.tuning_params = state_dict.get('tuning_params', {})
+        self.feature_names = state_dict.get('feature_names', None)
+        self.feature_scaler = state_dict.get('feature_scaler', StandardScaler())
+        self.train_X = state_dict.get('train_X', None)
+        self.train_y = state_dict.get('train_y', None)
+        
+    def cpu(self):
+        """Compatibility method for PyTorch-style models (no-op for sklearn)."""
+        return self
+        
+    def to(self, device):
+        """Compatibility method for PyTorch-style models (no-op for sklearn)."""
+        return self
